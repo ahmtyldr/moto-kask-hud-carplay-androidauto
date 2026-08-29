@@ -1,0 +1,12 @@
+# Real credentials — never commit
+boot/livi-setup.env
+*.env
+!*.env.example
+
+# Logs pulled off the device
+*.log
+logs/
+
+# OS noise
+.DS_Store
+._*
