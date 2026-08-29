@@ -12,6 +12,7 @@ tutuyor.
 | Raspberry Pi 3B+ üzerinde LIVI | ✅ Çalışıyor (geçici video düzeltmesiyle) |
 | Kablosuz Android Auto | ✅ Çalışıyor — 5 GHz AP, kanal 36 |
 | Kablosuz CarPlay | ⏳ Carlinkit dongle bekleniyor |
+| Türkçe arayüz | ✅ Yama hazır ([patches/](patches/)) |
 | CM4'e geçiş | ⏳ Planlandı |
 | AR gözlük ile HUD | ⏳ Planlandı |
 
@@ -27,6 +28,11 @@ GStreamer hattındaki tek bir eksik eleman. Tam analiz ve çözüm:
 Pi 4/5'te donanım çözücü DMABuf verdiği için buna gerek yok; Pi 3'te çözücü YUV'u normal
 bellekte veriyor ve `waylandsink` orada sadece RGB kabul ediyor → `not-negotiated (-4)`,
 hiç kare üretilmiyor.
+
+## Türkçe dil desteği
+
+LIVI'ye Türkçe arayüz ekleyen yama `patches/` altında — 266 anahtarın tamamı çevrildi.
+Uygulama ve derleme adımları için [patches/README.md](patches/README.md).
 
 ## Kurulum
 
