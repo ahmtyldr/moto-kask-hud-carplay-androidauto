@@ -1,0 +1,121 @@
+name: build-livi
+
+# Builds a LIVI arm64 AppImage with this repo's patches applied.
+#
+# LIVI is not vendored here — it is checked out fresh at a pinned tag and the
+# patches in patches/ are applied on top. That keeps this repo small, keeps the
+# patches reviewable as patches, and avoids embedding a GPL-3.0 project.
+#
+# Runs on a native arm64 runner, so no cross-compilation or QEMU is involved.
+
+on:
+  workflow_dispatch:
+    inputs:
+      livi_ref:
+        description: 'LIVI tag or branch to build'
+        type: string
+        default: 'v8.3.0'
+  push:
+    paths:
+      - 'patches/**'
+      - '.github/workflows/build-livi.yml'
+
+jobs:
+  build:
+    name: LIVI arm64 AppImage
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout this repo (patches)
+        uses: actions/checkout@v4
+        with:
+          path: overlay
+
+      - name: Checkout LIVI
+        uses: actions/checkout@v4
+        with:
+          repository: f-io/LIVI
+          ref: ${{ inputs.livi_ref || 'v8.3.0' }}
+          path: livi
+
+      - name: Apply patches
+        working-directory: livi
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          patches=(../overlay/patches/*.patch)
+          if [ ${#patches[@]} -eq 0 ]; then
+            echo "No patches found — nothing to apply."
+            exit 1
+          fi
+          for p in "${patches[@]}"; do
+            echo "==> applying $(basename "$p")"
+            git apply --verbose "$p"
+          done
+          echo "--- locales present after patching ---"
+          ls src/renderer/src/locales/
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Setup pnpm
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack prepare pnpm@11.24.0 --activate
+          pnpm --version
+
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+              build-essential python3 python3-dev python3-pip \
+              pkg-config libudev1 ca-certificates \
+              libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+              ninja-build bison cmake \
+              libegl-dev libgles-dev libgbm-dev libcairo2-dev \
+              libffi-dev libexpat1-dev
+          sudo pip3 install --break-system-packages --upgrade 'meson>=1.4'
+
+      - name: Setup Rust
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            livi/native/livi-helperd/target
+          key: cargo-arm64-${{ hashFiles('livi/native/livi-helperd/**/Cargo.toml') }}
+          restore-keys: cargo-arm64-
+
+      - name: Install node dependencies
+        working-directory: livi
+        run: pnpm install --frozen-lockfile
+
+      - name: Build AppImage
+        working-directory: livi
+        run: |
+          set -euo pipefail
+          ELECTRON_VERSION=$(node -p "require('./node_modules/electron/package.json').version")
+          npx --yes node-gyp install --target="$ELECTRON_VERSION" \
+            --dist-url=https://artifacts.electronjs.org/headers/dist
+          pnpm run build:linux:arm64
+          ls -lh dist/*.AppImage
+
+      - name: Upload AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: LIVI-tr-linux-arm64
+          path: livi/dist/*.AppImage
+          retention-days: 14
+          if-no-files-found: error

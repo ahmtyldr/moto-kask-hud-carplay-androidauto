@@ -32,7 +32,14 @@ hiç kare üretilmiyor.
 ## Türkçe dil desteği
 
 LIVI'ye Türkçe arayüz ekleyen yama `patches/` altında — 266 anahtarın tamamı çevrildi.
-Uygulama ve derleme adımları için [patches/README.md](patches/README.md).
+
+Derleme için fork gerekmiyor: `.github/workflows/build-livi.yml` iş akışı LIVI'yi sabitlenmiş
+bir etikette checkout edip `patches/` altındaki yamaları uyguluyor ve native arm64 runner'da
+AppImage üretiyor. LIVI bu repoya kopyalanmıyor — yama yama olarak kalıyor, GPL karmaşası
+doğmuyor, upstream güncellemesi tek satır (`livi_ref`) değiştirerek alınıyor.
+
+Çalıştırmak için: **Actions → build-livi → Run workflow**. Detaylar:
+[patches/README.md](patches/README.md).
 
 ## Kurulum
 
