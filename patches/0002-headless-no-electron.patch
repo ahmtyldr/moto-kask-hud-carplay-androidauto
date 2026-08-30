@@ -1,0 +1,500 @@
+diff --git a/scripts/build-headless.mjs b/scripts/build-headless.mjs
+new file mode 100644
+index 0000000..b277059
+--- /dev/null
++++ b/scripts/build-headless.mjs
+@@ -0,0 +1,73 @@
++/**
++ * Bundles the headless (no-Electron) LIVI appliance for plain Node.
++ *
++ * The whole trick is the `electron` alias: every import of 'electron' resolves
++ * to src/main/headless/electronShim.ts instead of the real runtime, so the
++ * existing TypeScript tree compiles and runs unchanged on Node. Nothing under
++ * src/main is edited for the headless build.
++ *
++ * Native addons (gst-video, crypto) stay external — they are prebuilt .node
++ * binaries loaded at runtime and must not be inlined.
++ */
++import { build } from 'esbuild'
++import { fileURLToPath } from 'node:url'
++import { dirname, join } from 'node:path'
++
++const root = join(dirname(fileURLToPath(import.meta.url)), '..')
++const r = (p) => join(root, p)
++
++// Mirrors tsconfig.node.json paths.
++const alias = {
++  electron: r('src/main/headless/electronShim.ts'),
++  '@main': r('src/main'),
++  '@shared': r('src/main/shared'),
++  '@projection': r('src/main/services/projection'),
++  '@audio': r('src/main/audio/index.ts')
++}
++
++/**
++ * Vite lets source import files as strings with a `?raw` suffix; esbuild has no
++ * such notion, so resolve those to the plain file and load it as text.
++ */
++const rawSuffixPlugin = {
++  name: 'raw-suffix',
++  setup(b) {
++    b.onResolve({ filter: /\?raw$/ }, (args) => ({
++      path: join(args.resolveDir, args.path.replace(/\?raw$/, '')),
++      namespace: 'raw-file'
++    }))
++    b.onLoad({ filter: /.*/, namespace: 'raw-file' }, async (args) => {
++      const { readFile } = await import('node:fs/promises')
++      return { contents: await readFile(args.path, 'utf8'), loader: 'text' }
++    })
++  }
++}
++
++await build({
++  entryPoints: [r('src/main/headless/index.ts')],
++  bundle: true,
++  platform: 'node',
++  target: 'node24',
++  format: 'cjs',
++  outfile: r('out-headless/livi-headless.cjs'),
++  sourcemap: true,
++  // Prebuilt addons and their loaders resolve at runtime, never inline them.
++  // `usb` ships per-platform .node binaries and must be required, not bundled.
++  external: ['*.node', 'bindings', 'node-gyp-build', 'usb', '@node-usb/*'],
++  alias,
++  plugins: [rawSuffixPlugin],
++  loader: { '.b64': 'text' },
++  logLevel: 'info',
++  metafile: true,
++  banner: {
++    js: '/* LIVI headless appliance — no Electron, no renderer. */'
++  }
++})
++  .then((res) => {
++    const out = Object.entries(res.metafile.outputs).find(([f]) => f.endsWith('.cjs'))
++    if (out) console.log(`bundle: ${(out[1].bytes / 1024).toFixed(0)} KB`)
++  })
++  .catch((err) => {
++    console.error(err)
++    process.exit(1)
++  })
+diff --git a/src/main/headless/bootstrapPaths.ts b/src/main/headless/bootstrapPaths.ts
+new file mode 100644
+index 0000000..514a161
+--- /dev/null
++++ b/src/main/headless/bootstrapPaths.ts
+@@ -0,0 +1,35 @@
++/**
++ * process.resourcesPath is an Electron addition — undefined on plain Node.
++ *
++ * Nine call sites read it to find bundled assets: the livi-helperd binary, the
++ * Android Auto protobuf definitions, packages.txt, GStreamer assets. Left unset
++ * they either throw ("path must be of type string") or silently resolve to the
++ * wrong place, which is how the first headless run lost its codec probe.
++ *
++ * Imported before anything else so the value exists by the time any module
++ * initialiser looks for it.
++ */
++import { existsSync } from 'node:fs'
++import { dirname, join, resolve } from 'node:path'
++
++function resolveResources(): string {
++  // Explicit override wins: lets systemd point at /opt/livi/resources.
++  const fromEnv = process.env.LIVI_RESOURCES
++  if (fromEnv && existsSync(fromEnv)) return resolve(fromEnv)
++
++  // Otherwise sit next to the bundle, which is how the package is laid out.
++  const beside = join(dirname(process.argv[1] ?? process.cwd()), 'resources')
++  if (existsSync(beside)) return beside
++
++  // Last resort: the repo's own assets, so a dev run from source still works.
++  return join(process.cwd(), 'resources')
++}
++
++const resourcesPath = resolveResources()
++Object.defineProperty(process, 'resourcesPath', {
++  value: resourcesPath,
++  writable: false,
++  configurable: true
++})
++
++export { resourcesPath }
+diff --git a/src/main/headless/electronShim.ts b/src/main/headless/electronShim.ts
+new file mode 100644
+index 0000000..015c8fd
+--- /dev/null
++++ b/src/main/headless/electronShim.ts
+@@ -0,0 +1,268 @@
++/**
++ * Minimal Electron API surface, implemented on plain Node.
++ *
++ * LIVI's projection core (drivers, protocol stacks, audio, video) is almost
++ * Electron-free: of 199 files under src/main only 42 import 'electron', and
++ * inside services/projection/driver just 6 do. What they use is a narrow slice —
++ * app.getPath, app.quit, commandLine, plus UI-only surfaces (BrowserWindow,
++ * dialog, shell, screen) that a headless appliance never calls.
++ *
++ * Aliasing 'electron' to this module lets the whole TypeScript tree run on Node
++ * untouched, which is what makes the headless build a shim rather than a
++ * rewrite. UI-only members are deliberately inert: if something reaches for a
++ * window we want a harmless no-op, not a crash.
++ */
++import { EventEmitter } from 'node:events'
++import { mkdirSync } from 'node:fs'
++import * as nodeHttp from 'node:http'
++import * as nodeHttps from 'node:https'
++import { homedir, tmpdir } from 'node:os'
++import { dirname, join } from 'node:path'
++
++const APP_NAME = 'LIVI'
++const CREATED_PATHS = new Set<string>()
++const HOME = homedir()
++
++/** XDG-ish paths, matching where Electron would put them for this app. */
++const PATHS: Record<string, string> = {
++  home: HOME,
++  appData: join(HOME, '.config'),
++  userData: join(HOME, '.config', APP_NAME),
++  sessionData: join(HOME, '.config', APP_NAME),
++  temp: tmpdir(),
++  exe: process.execPath,
++  module: process.execPath,
++  desktop: join(HOME, 'Desktop'),
++  documents: join(HOME, 'Documents'),
++  downloads: join(HOME, 'Downloads'),
++  music: join(HOME, 'Music'),
++  pictures: join(HOME, 'Pictures'),
++  videos: join(HOME, 'Videos'),
++  logs: join(HOME, '.config', APP_NAME, 'log'),
++  crashDumps: join(tmpdir(), `${APP_NAME}-crashes`)
++}
++
++class CommandLine {
++  private switches = new Map<string, string>()
++  appendSwitch(key: string, value?: string): void {
++    this.switches.set(key, value ?? '')
++  }
++  appendArgument(_arg: string): void {}
++  hasSwitch(key: string): boolean {
++    return this.switches.has(key)
++  }
++  getSwitchValue(key: string): string {
++    return this.switches.get(key) ?? ''
++  }
++}
++
++class App extends EventEmitter {
++  readonly commandLine = new CommandLine()
++  readonly isPackaged = true
++  private version = process.env.LIVI_VERSION ?? '0.0.0-headless'
++  private appPath = dirname(process.argv[1] ?? process.cwd())
++
++  /**
++   * Electron creates userData/logs on demand; callers assume the directory is
++   * there and write straight into it. Mirror that, or loadConfig() dies on a
++   * fresh unit with ENOENT before anything else can start.
++   */
++  getPath(name: string): string {
++    const p = PATHS[name]
++    if (!p) throw new Error(`electronShim: unknown path '${name}'`)
++    if (CREATED_PATHS.has(name)) return p
++    if (name === 'userData' || name === 'sessionData' || name === 'logs' || name === 'crashDumps') {
++      mkdirSync(p, { recursive: true })
++      CREATED_PATHS.add(name)
++    }
++    return p
++  }
++  setPath(name: string, value: string): void {
++    PATHS[name] = value
++  }
++  getAppPath(): string {
++    return this.appPath
++  }
++  getVersion(): string {
++    return this.version
++  }
++  getName(): string {
++    return APP_NAME
++  }
++  setName(_n: string): void {}
++  whenReady(): Promise<void> {
++    return Promise.resolve()
++  }
++  // Single instance is enforced by systemd in the appliance build.
++  requestSingleInstanceLock(): boolean {
++    return true
++  }
++  releaseSingleInstanceLock(): void {}
++  // relaunch+quit is how LIVI restarts itself; systemd's Restart= does it here.
++  relaunch(_opts?: unknown): void {
++    process.exitCode = 42
++  }
++  quit(): void {
++    this.emit('before-quit')
++    process.exit(process.exitCode ?? 0)
++  }
++  exit(code = 0): never {
++    process.exit(code)
++  }
++  disableHardwareAcceleration(): void {}
++  setLoginItemSettings(_s: unknown): void {}
++}
++
++/**
++ * No windows exist headless. GstVideo asks for a native window handle before it
++ * builds the pipeline; on Linux gst_video.cc ignores that handle entirely (it
++ * only matters for the macOS/Windows overlay), so a non-null dummy is enough to
++ * get past the guard and let waylandsink/kmssink take over.
++ */
++const DUMMY_HANDLE = Buffer.alloc(8)
++
++class BrowserWindowStub extends EventEmitter {
++  static getAllWindows(): BrowserWindowStub[] {
++    return []
++  }
++  static fromWebContents(_wc: unknown): BrowserWindowStub | null {
++    return null
++  }
++  static fromId(_id: number): BrowserWindowStub | null {
++    return null
++  }
++  readonly webContents = { send: (): void => {}, id: 0 }
++  getNativeWindowHandle(): Buffer {
++    return DUMMY_HANDLE
++  }
++  isMinimized(): boolean {
++    return false
++  }
++  isDestroyed(): boolean {
++    return true
++  }
++  restore(): void {}
++  show(): void {}
++  focus(): void {}
++  close(): void {}
++  destroy(): void {}
++  setBounds(_b: unknown): void {}
++  getBounds(): { x: number; y: number; width: number; height: number } {
++    return { x: 0, y: 0, width: 0, height: 0 }
++  }
++}
++
++/** Prompts have no one to answer them; take the default and carry on. */
++const dialog = {
++  showMessageBox: async (): Promise<{ response: number; checkboxChecked: boolean }> => ({
++    response: 0,
++    checkboxChecked: false
++  }),
++  showMessageBoxSync: (): number => 0,
++  showOpenDialog: async (): Promise<{ canceled: boolean; filePaths: string[] }> => ({
++    canceled: true,
++    filePaths: []
++  }),
++  showErrorBox: (title: string, content: string): void => {
++    console.error(`[dialog] ${title}: ${content}`)
++  }
++}
++
++const shell = {
++  openExternal: async (url: string): Promise<void> => {
++    console.log(`[shell] openExternal ignored (headless): ${url}`)
++  },
++  openPath: async (): Promise<string> => '',
++  showItemInFolder: (): void => {}
++}
++
++/**
++ * Display geometry comes from the kernel in the appliance build; nothing in the
++ * projection path needs it, so report a single sane display.
++ */
++const PRIMARY_DISPLAY = {
++  id: 1,
++  label: 'headless',
++  bounds: { x: 0, y: 0, width: 1280, height: 720 },
++  workArea: { x: 0, y: 0, width: 1280, height: 720 },
++  size: { width: 1280, height: 720 },
++  workAreaSize: { width: 1280, height: 720 },
++  scaleFactor: 1,
++  rotation: 0,
++  internal: false
++}
++
++const screen = Object.assign(new EventEmitter(), {
++  getAllDisplays: () => [PRIMARY_DISPLAY],
++  getPrimaryDisplay: () => PRIMARY_DISPLAY,
++  getDisplayMatching: () => PRIMARY_DISPLAY,
++  getDisplayNearestPoint: () => PRIMARY_DISPLAY,
++  getCursorScreenPoint: () => ({ x: 0, y: 0 })
++})
++
++
++const ipcMain = Object.assign(new EventEmitter(), {
++  handle: (_ch: string, _fn: unknown): void => {},
++  handleOnce: (_ch: string, _fn: unknown): void => {},
++  removeHandler: (_ch: string): void => {}
++})
++
++const webContents = {
++  getAllWebContents: () => [],
++  fromId: (_id: number) => null
++}
++
++const session = {
++  defaultSession: {
++    setPermissionRequestHandler: (): void => {},
++    clearCache: async (): Promise<void> => {},
++    protocol: {
++      handle: (): void => {},
++      registerSchemesAsPrivileged: (): void => {}
++    }
++  },
++  fromPartition: () => session.defaultSession
++}
++
++const protocol = {
++  handle: (): void => {},
++  registerSchemesAsPrivileged: (): void => {}
++}
++
++/**
++ * Electron's net.request is close enough to node:http.request that the callers
++ * (dongle firmware update) work unchanged: same 'response'/'error' events, same
++ * write/end. The only real difference is that Electron accepts the target as a
++ * `url` field inside the options object.
++ */
++const net = {
++  request(options: { method?: string; url: string; headers?: Record<string, string> } | string) {
++    const opts = typeof options === 'string' ? { url: options } : options
++    const u = new URL(opts.url)
++    const mod = u.protocol === 'https:' ? nodeHttps : nodeHttp
++    return mod.request(u, {
++      method: opts.method ?? 'GET',
++      headers: opts.headers
++    })
++  },
++  fetch: (input: string | URL | Request, init?: RequestInit): Promise<Response> =>
++    globalThis.fetch(input as never, init),
++  isOnline: (): boolean => true
++}
++
++const app = new App()
++
++export {
++  app,
++  net,
++  BrowserWindowStub as BrowserWindow,
++  dialog,
++  ipcMain,
++  protocol,
++  screen,
++  session,
++  shell,
++  webContents
++}
++export type WebContents = { send: (channel: string, ...args: unknown[]) => void; id: number }
++export default { app, BrowserWindow: BrowserWindowStub, dialog, ipcMain, net, protocol, screen, session, shell, webContents }
+diff --git a/src/main/headless/index.ts b/src/main/headless/index.ts
+new file mode 100644
+index 0000000..3138a1e
+--- /dev/null
++++ b/src/main/headless/index.ts
+@@ -0,0 +1,100 @@
++/**
++ * Headless LIVI: boot straight into CarPlay / Android Auto projection.
++ *
++ * The stock entry point (src/main/index.ts, 199 lines) spends most of itself on
++ * things an appliance has no use for — windows, telemetry dashboards, brightness
++ * and volume plumbing, package-check dialogs. The projection chain underneath is
++ * short:
++ *
++ *     new ProjectionService() → new USBService(it) → applyConfigPatch → autoStart
++ *
++ * Video never went through Chromium in the first place: the pipeline is
++ * appsrc → parser → decoder → waylandsink, so dropping the renderer costs no
++ * picture. It only costs the settings UI, which moves to the config file (and
++ * later, a page served to the driver's phone).
++ */
++// MUST be first: publishes process.resourcesPath before any module reads it.
++import { resourcesPath } from './bootstrapPaths'
++
++import '../logTimestamps'
++
++import { setDebugLogging } from '@main/constants'
++import { loadConfig } from '@main/config/loadConfig'
++import { ProjectionService } from '@main/services/projection/services/ProjectionService'
++import { USBService } from '@main/services/usb/USBService'
++import { setStreamGamma } from '@main/services/video/GstVideo'
++
++/**
++ * ProjectionService pushes events at a renderer's WebContents. Nothing is
++ * listening here, but two call sites gate on hasRenderer() (DongleState,
++ * BtPairedRegistry), so attach a sink that satisfies the interface. This is also
++ * the seam where a phone-served UI would plug in later: forward instead of drop.
++ */
++function createEventSink(verbose: boolean): { send: (ch: string, ...a: unknown[]) => void; id: number } {
++  return {
++    id: 0,
++    send: (channel: string, ...args: unknown[]): void => {
++      if (!verbose) return
++      console.log(`[event] ${channel}`, ...args.map((a) => JSON.stringify(a)?.slice(0, 300)))
++    }
++  }
++}
++
++async function main(): Promise<void> {
++  const config = loadConfig()
++  setDebugLogging(config.debugLogging === true)
++
++  const verbose = process.env.LIVI_HEADLESS_VERBOSE === '1' || config.debugLogging === true
++  console.log(`[headless] resources: ${resourcesPath}`)
++  console.log(
++    `[headless] starting — projection ${config.projectionWidth}x${config.projectionHeight}` +
++      `@${config.projectionFps}, wirelessAA=${config.wirelessAaEnabled} wirelessCP=${config.wirelessCpEnabled}`
++  )
++
++  const projectionService = new ProjectionService()
++  const usbService = new USBService(projectionService)
++
++  projectionService.attachRenderer(createEventSink(verbose) as never)
++
++  // Display calibration lives in the video pipeline, not the UI, so it still applies.
++  setStreamGamma(
++    config.displayGamma,
++    config.displayContrast,
++    config.displayColorR,
++    config.displayColorG,
++    config.displayColorB
++  )
++
++  projectionService.applyConfigPatch(config)
++
++  // beginShutdown() first so in-flight work stops arming new sessions, then the
++  // async stop() unwinds USB and the projection drivers. Bounded, because a
++  // wedged driver must not keep the unit from powering down.
++  let stopping = false
++  const shutdown = async (signal: string): Promise<void> => {
++    if (stopping) return
++    stopping = true
++    console.log(`[headless] ${signal} — stopping`)
++    try {
++      usbService.beginShutdown()
++      projectionService.beginShutdown()
++      await Promise.race([
++        Promise.all([usbService.stop(), projectionService.stop()]),
++        new Promise((r) => setTimeout(r, 5000))
++      ])
++    } catch (err) {
++      console.error('[headless] shutdown error:', err)
++    }
++    process.exit(0)
++  }
++  process.on('SIGINT', () => void shutdown('SIGINT'))
++  process.on('SIGTERM', () => void shutdown('SIGTERM'))
++
++  await projectionService.autoStartIfNeeded()
++  console.log('[headless] projection armed — waiting for a phone')
++}
++
++main().catch((err) => {
++  console.error('[headless] fatal:', err)
++  process.exit(1)
++})

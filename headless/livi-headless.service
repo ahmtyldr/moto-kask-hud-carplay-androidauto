@@ -1,0 +1,41 @@
+[Unit]
+Description=LIVI headless projection appliance
+Documentation=https://github.com/ahmtyldr/moto-kask-hud-carplay-androidauto
+After=network.target sound.target bluetooth.target
+Wants=bluetooth.target
+
+[Service]
+Type=simple
+User=livi
+Group=livi
+# Video, DRM and input access; sudo is used internally for the Wi-Fi AP helper.
+SupplementaryGroups=video render input plugdev audio bluetooth
+
+WorkingDirectory=/opt/livi
+Environment=LIVI_RESOURCES=/opt/livi/resources
+Environment=NODE_ENV=production
+# Frames go straight to KMS: no compositor, no Chromium, nothing to composite
+# against. This is the whole point of the headless build.
+Environment=GST_GL_WINDOW=surfaceless
+Environment=GST_GL_PLATFORM=egl
+
+ExecStart=/usr/bin/node /opt/livi/livi-headless.cjs
+
+# The unit is the product: if projection dies, bring it back rather than leaving
+# a black screen on a bike.
+Restart=always
+RestartSec=3
+# exit 42 is the app asking to be relaunched (app.relaunch in the shim).
+SuccessExitStatus=0 42
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=livi-headless
+
+# Give the projection loop priority over background housekeeping.
+Nice=-5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=2
+
+[Install]
+WantedBy=multi-user.target

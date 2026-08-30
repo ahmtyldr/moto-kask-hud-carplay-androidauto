@@ -13,6 +13,7 @@ tutuyor.
 | Kablosuz Android Auto | ✅ Çalışıyor — 5 GHz AP, kanal 36 |
 | Kablosuz CarPlay | ⏳ Carlinkit dongle bekleniyor |
 | Türkçe arayüz | ✅ Yama hazır ([patches/](patches/)) |
+| **Headless (Electron'suz) sürüm** | ✅ Konteynerde çalışıyor ([headless/](headless/)) |
 | CM4'e geçiş | ⏳ Planlandı |
 | AR gözlük ile HUD | ⏳ Planlandı |
 
@@ -40,6 +41,14 @@ doğmuyor, upstream güncellemesi tek satır (`livi_ref`) değiştirerek alını
 
 Çalıştırmak için: **Actions → build-livi → Run workflow**. Detaylar:
 [patches/README.md](patches/README.md).
+
+## Headless sürüm — Electron'suz
+
+LIVI'nin projeksiyon çekirdeği, arayüz olmadan düz Node üzerinde çalışıyor.
+308 MB'lık AppImage yerine **16 MB'lık paket**; LIVI'nin 54.454 satırlık
+TypeScript'inde **sıfır değişiklik**, toplam ~425 satır yeni kod.
+
+Ayrıntı ve kurulum: [headless/README.md](headless/README.md)
 
 ## Kurulum
 
