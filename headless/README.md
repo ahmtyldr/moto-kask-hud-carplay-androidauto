@@ -60,22 +60,35 @@ pnpm install --frozen-lockfile
 # native addons against the NODE ABI, not Electron's
 ( cd native/gst-video && npx node-gyp rebuild )
 ( cd native/crypto   && npx node-gyp rebuild )
-( cd native/livi-helperd && cargo build --release -p livi-helperd )
 
 node scripts/build-headless.mjs
 ```
 
-Then assemble:
+No Rust: at v8.3.0 the privileged helper is still Python
+(`src/main/services/projection/driver/helper/livi-helper.py`; the Rust
+`livi-helperd` only exists on `main`). helperSupervisor.ts resolves it at
+`<resources>/driver/helper/livi-helper.py` and runs it with the system
+`python3`. Then assemble:
 
 ```
 dist-headless/
 ├── livi-headless.cjs
 ├── native/{gst_video,livi_crypto}.node
 ├── node_modules/{usb,@node-usb}
+├── statusui/livi-statusui          ← optional idle screen
 └── resources/
-    ├── driver/livi-helperd
+    ├── driver/helper/livi-helper.py (whole helper/ dir)
     ├── aa/protos/aap_protobuf/     ← 254 .proto files
     └── packages.txt
+```
+
+`build-headless-bundle.sh` (bu klasörde) akışın tamamını arm64 konteynerde
+koşturur — klon, yamalar, native derleme, bundle ve assemble dahil:
+
+```bash
+docker run --rm -i --platform linux/arm64 \
+  -v "$(git rev-parse --show-toplevel)":/host \
+  debian:trixie bash < headless/build-headless-bundle.sh
 ```
 
 ## Installing
@@ -106,6 +119,26 @@ listener on :7000, scans USB, shuts down cleanly.
 **Not yet verified on real hardware.** `hw=false` above is the container having
 no V4L2 devices; on a Pi the probe should find `v4l2h264dec`. Whether a phone
 actually connects and paints a frame is untested.
+
+## Idle screen (optional)
+
+Without it the screen is blank until a phone connects. `statusui/` holds a
+~300-line LVGL program that draws a spinner and "Cihaz bekleniyor" straight on
+KMS while idle; `patches/0004-headless-status-ui.patch` wires its lifecycle
+into the event-sink seam (spawned at boot, SIGTERMed when video starts so
+kmssink can take the display, respawned on disconnect). Build and shipping:
+[statusui/README.md](statusui/README.md). If the binary is not in the package,
+everything behaves exactly as before.
+
+## Input (optional)
+
+`patches/0005-headless-input-bridge.patch` reads evdev directly and feeds
+LIVI's own `projection-touch`/`projection-command` IPC listeners through the
+shim's ipcMain: mouse = touch/drag, wheel = knob, right-click = Back, keyboard
+arrows/Enter = D-Pad/Select, Space = play/pause, V = voice assistant. No
+pointer is drawn (kmssink owns the display), so wheel/keyboard — which AA
+answers with its own focus ring — is the usable idiom; a cursor overlay would
+need the DRM cursor plane from the gst host. Disable with `LIVI_INPUT_BRIDGE=0`.
 
 ## Configuration
 

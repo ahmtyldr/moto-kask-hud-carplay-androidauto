@@ -10,3 +10,7 @@ logs/
 # OS noise
 .DS_Store
 ._*
+
+# Build output — produced by headless/build-headless-bundle.sh
+headless/dist-headless/
+headless/statusui/build/

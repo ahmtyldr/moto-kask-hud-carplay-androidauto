@@ -40,6 +40,26 @@ Ayarlar → General → Language → Turkish.
 GStreamer dev + meson/wlroots istiyor. En pratik yol LIVI'yi fork'layıp GitHub Actions'a
 derletmek — proje zaten AppImage'ları CI ile üretiyor.
 
+## 0004-headless-status-ui.patch
+
+Headless sürüme (0002'nin üstüne uygulanır) LVGL bekleme ekranı bağlantısını
+ekler: yeni `src/main/headless/statusUi.ts` süreci yönetir, `index.ts`'teki
+event sink olayları ona iletir. Ekranı çizen C programı bu repoda —
+`headless/statusui/` — ve tamamen opsiyoneldir: ikili pakette yoksa yama
+hiçbir davranış değiştirmez. Detay: `headless/statusui/README.md`.
+
+## 0005-headless-input-bridge.patch
+
+Headless sürüme (0004'ün üstüne uygulanır) USB girdi köprüsü ekler:
+`src/main/headless/inputBridge.ts` `/dev/input/event*` cihazlarını doğrudan okur
+ve olayları shim'in `ipcMain`'i üzerinden LIVI'nin kendi `projection-touch` /
+`projection-command` dinleyicilerine verir (ProjectionService bunları zaten
+kaydediyor — sıfır LIVI değişikliği). Fare = dokunma/sürükleme, tekerlek = knob,
+sağ tuş = geri; klavye okları = D-Pad, Enter = seç, Boşluk = oynat/duraklat,
+V = sesli asistan. `LIVI_INPUT_BRIDGE=0` ile kapatılır. Bilinen sınır: imleç
+çizilmez (ekranın sahibi kmssink) — tekerlek/klavye akışı bu yüzden en kullanışlı
+yol, AA odak halkasını kendisi gösterir.
+
 ## Terminoloji notları
 
 Otomotiv arayüzünde yerleşik olmayan bazı terimler için yapılan seçimler:
