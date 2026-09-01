@@ -13,7 +13,7 @@ tutuyor.
 | Kablosuz Android Auto | ✅ Çalışıyor — 5 GHz AP, kanal 36 |
 | Kablosuz CarPlay | ⏳ Carlinkit dongle bekleniyor |
 | Türkçe arayüz | ✅ Yama hazır ([patches/](patches/)) |
-| **Headless (Electron'suz) sürüm** | ✅ Konteynerde çalışıyor ([headless/](headless/)) |
+| **Headless (Electron'suz) sürüm** | ✅ Pi 3B+'ta çalışıyor — video, ses, girdi ([headless/](headless/)) |
 | CM4'e geçiş | ⏳ Planlandı |
 | AR gözlük ile HUD | ⏳ Planlandı |
 
@@ -47,6 +47,11 @@ doğmuyor, upstream güncellemesi tek satır (`livi_ref`) değiştirerek alını
 LIVI'nin projeksiyon çekirdeği, arayüz olmadan düz Node üzerinde çalışıyor.
 308 MB'lık AppImage yerine **16 MB'lık paket**; LIVI'nin 54.454 satırlık
 TypeScript'inde **sıfır değişiklik**, toplam ~425 satır yeni kod.
+
+Pi 3B+ üzerinde doğrulandı: kablosuz ve kablolu Android Auto, donanım H.264
+çözme (sıfır kopya dmabuf → kmssink), 3.5 mm jack'ten ses, LVGL bekleme ekranı
+ve telefonun kendi odak halkasıyla fare kontrolü. Ölçüm — Electron'lu sürüm →
+headless: CPU %90 → **%16**, bellek 561 MB → **279 MB**, sıcaklık 67 °C → **53 °C**.
 
 Ayrıntı ve kurulum: [headless/README.md](headless/README.md)
 
