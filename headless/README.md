@@ -170,9 +170,10 @@ separately); `LIVI_INPUT_BRIDGE=0` disables the bridge.
 The stock cmdline sends the kernel console to tty1 — the HDMI panel — so fsck
 output, kernel messages and systemd's "Starting ..." lines are printed over the
 screen the rider looks at; `quiet` and `loglevel=0` do not stop them on their
-own. `quiet-boot.sh` moves the console to tty3, turns off systemd's status
-output and masks the tty1 login prompt, leaving the panel blank until the idle
-screen takes it:
+own. `quiet-boot.sh` moves the console to tty3, turns off systemd's status output,
+masks the tty1 login prompt and drops the splash — LIVI's installer leaves its
+own Plymouth theme behind, and a second brand flashing past before our idle
+screen reads as a glitch. The panel stays blank until the idle screen takes it:
 
 ```bash
 ./quiet-boot.sh && sudo reboot
