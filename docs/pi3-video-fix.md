@@ -84,10 +84,75 @@ is no fallback path at all.
 
 ## Workaround
 
-Hide the V4L2 codec devices from the kiosk service so `decoder_for()` falls through to
-`avdec_h264` / `avdec_h265`. Those take the software branch and get `videoconvert` for free.
+`sink_chain()` reads an environment variable and pastes its value into the pipeline
+description verbatim, so an arbitrary chain can be injected there — not just a single
+element:
+
+```cpp
+const char* sink_env = getenv("LIVI_GST_SINK");                     // gst_video.cc:259
+return std::string(sink_env && *sink_env ? sink_env : "waylandsink")
+     + " name=sink sync=false";
+```
+
+That is enough to insert the missing converter without touching the decoder, so the codec
+devices stay visible and the hardware decoder is still selected.
 
 `/etc/systemd/system/livi-kiosk.service.d/livi-pi3.conf`:
+
+```ini
+[Service]
+Environment="LIVI_GST_SINK=video/x-raw ! videoconvert n-threads=4 ! waylandsink"
+```
+
+The bare `video/x-raw` capsfilter is the part that matters, and it is easy to leave out.
+Injecting `videoconvert` alone does **not** work: negotiation still settles on DMABuf and
+fails identically, with the decoder producing nothing at all. Pinning the caps to plain
+system memory — which is what the decoder actually delivers — is what makes the two ends
+agree. Both variants were measured; only the one with the capsfilter negotiates.
+
+`Environment=` must be quoted as a whole, or systemd splits the value on whitespace and
+`n-threads=4` is parsed as a second assignment. `n-threads` also needs a videoconvert that
+carries the property; the GStreamer 1.28.4 bundled in the v8.3.0 AppImage does:
+
+```bash
+strings .../gstreamer-1.0/libgstvideoconvertscale.so | grep -x n-threads
+```
+
+Resulting pipeline, verified on a Pi 3B+ with wired Android Auto:
+
+```
+[gst_video] codec=h264 decoder=v4l2h264dec (hw) | appsrc ! h264parse ! queue
+            ! v4l2h264dec name=dec ! queue leaky=downstream
+            ! video/x-raw ! videoconvert n-threads=4 ! waylandsink
+[gst_video] decoded format=I420 1280x720 mem=memory:SystemMemory
+[Session] ★ phone picked video codec: H264 (offered: h264)
+```
+
+No `not-negotiated` errors, and the phone is never offered HEVC, because `p.h264.hw` stays
+true with the codec nodes visible.
+
+### What it costs, and what is left
+
+Decoding is back on the VideoCore IV, but the frames still take a copy out of the decoder's
+CMA buffer and a colour conversion on the way to the sink. Measured during a session,
+already thermally capped at 1.2 GHz:
+
+| | |
+|---|---|
+| `livi-gst-host` | ~190 % CPU (about two cores) |
+| All four cores | ~90 % busy, 10 % idle |
+| SoC temperature | 62.8 → 66.6 °C over four minutes |
+| `vcgencmd get_throttled` | `0x80008` — soft temperature limit active |
+| Memory | 561 MB of 855 MB used, no swap pressure |
+
+So the HEVC-in-software problem is traded for an RGB conversion, which is much cheaper but
+not free. `patches/0003-pi3-dmabuf-capture.patch` removes both the copy and the conversion
+by making the decoder export dmabuf, which `waylandsink` accepts as I420 directly.
+
+### Earlier workaround, kept as a fallback
+
+Hiding the V4L2 codec devices makes `decoder_for()` fall through to `avdec_h264` /
+`avdec_h265`, which take the software branch and get `videoconvert` for free:
 
 ```ini
 [Service]
@@ -97,14 +162,10 @@ InaccessiblePaths=/dev/video10 /dev/video11 /dev/video12
 Note that `chmod` alone is not enough — an ACL on those device nodes still grants the session
 user access. `InaccessiblePaths=` is scoped to the service and is trivially reversible.
 
-Resulting pipeline, which works:
+This draws a picture, but it gives up hardware decoding and triggers the codec problem
+below. Use it only if the injection above stops negotiating.
 
-```
-[gst_video] codec=h265 decoder=avdec_h265 (sw) | ... ! videoconvert ! waylandsink
-[gst_video] decoded format=I420 1280x720 mem=memory:SystemMemory
-```
-
-## Side effect: the phone starts choosing HEVC
+## Side effect of the fallback: the phone starts choosing HEVC
 
 `src/main/services/projection/services/CodecCapabilityService.ts`:
 
@@ -118,7 +179,8 @@ sets `p.h264.hw = false`, LIVI advertises HEVC, and the phone picks it — the m
 codec to decode in software, on the weakest CPU.
 
 There is no setting to force H.264, and `avdec_h265` cannot be removed independently of
-`avdec_h264` (same libav plugin).
+`avdec_h264` (same libav plugin). The `LIVI_GST_SINK` fix above avoids this entirely: with
+the codec nodes visible, `p.h264.hw` is true and HEVC is never advertised.
 
 Practical mitigation: drop `projectionFps` from 60 to 30 in `config.json`. That roughly halves
 the decode load and was clearly noticeable. Dropping the stream to 800x480 produced corrupted

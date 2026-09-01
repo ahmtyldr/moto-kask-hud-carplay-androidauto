@@ -1,0 +1,22 @@
+--- a/native/gst-video/src/gst_video.cc
++++ b/native/gst-video/src/gst_video.cc
+@@ -478,6 +478,19 @@
+ 
+   GstElement* dec = gst_bin_get_by_name(GST_BIN(pipeline), "dec");
+   if (dec) {
++    // The Pi 3's stateful bcm2835-codec defaults to capture-io-mode=auto, which
++    // settles on MMAP and therefore advertises plain system memory. waylandsink
++    // takes YUV only over memory:DMABuf and RGB only over system memory, so the
++    // decoder's I420-in-system-memory never intersects and the pipeline dies
++    // with not-negotiated (-4) before a single frame is drawn.
++    //
++    // The driver allocates through videobuf2-dma-contig, which can export those
++    // CMA buffers as dmabuf, so asking for it directly gives waylandsink the
++    // I420 DMABuf it already accepts - zero-copy, and with no videoconvert on
++    // the CPU. Harmless on the Pi 4/5, whose decoders export dmabuf already.
++    if (!strncmp(decoder, "v4l2", 4)) {
++      gst_util_set_object_arg(G_OBJECT(dec), "capture-io-mode", "dmabuf");
++    }
+     GstPad* dsrc = gst_element_get_static_pad(dec, "src");
+     if (dsrc) {
+       gst_pad_add_probe(dsrc, GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM, decoded_caps_log_probe, NULL,
