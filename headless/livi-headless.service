@@ -1,8 +1,13 @@
 [Unit]
 Description=LIVI headless projection appliance
 Documentation=https://github.com/ahmtyldr/moto-kask-hud-carplay-androidauto
-After=network.target sound.target bluetooth.target
-Wants=bluetooth.target
+# Deliberately NOT After=network.target: that target waits for NetworkManager,
+# which costs ~4 s of a 21 s boot, and this unit does not need it — the Wi-Fi AP
+# is brought up by LIVI's own helper (hostapd on wlan0), and the projection
+# listeners bind before any phone can answer. Wants= keeps the ordering
+# preference without blocking on it, so a wired link still comes up normally.
+After=basic.target bluetooth.target
+Wants=network.target bluetooth.target
 
 [Service]
 Type=simple
@@ -26,6 +31,20 @@ Environment="LIVI_GST_SINK=kmssink force-modesetting=true"
 # ring driven by rotary ticks — which requires not announcing a touchscreen
 # (patch 0006). The two settings only make sense together.
 Environment=LIVI_AA_TOUCHSCREEN=0
+# Without a writable registry GStreamer rescans every plugin on each start: the
+# codec probe alone took 6.8 s of boot, and 0.075 s once the registry persists.
+# gstEnv() spreads process.env, so setting it here reaches the probe and the
+# audio pipeline alike.
+Environment=GST_REGISTRY_1_0=/var/cache/livi/gst-registry.bin
+# And never rescan: the Pi has no RTC, so at boot the clock is behind and every
+# plugin looks newer than the registry, which invalidates it and costs the 6.8 s
+# again on each start. An appliance's plugin set does not change between boots;
+# install.sh primes the registry once, and `sudo -u livi GST_REGISTRY_UPDATE=""
+# gst-inspect-1.0 >/dev/null` refreshes it after any GStreamer package change.
+Environment=GST_REGISTRY_UPDATE=no
+# Same idea for the 1 MB bundle: Node 22+ caches compiled bytecode, which is
+# worth a second or so of a cold start on an A53.
+Environment=NODE_COMPILE_CACHE=/var/cache/livi/node
 # A wedged pipeline must not hold up a power-down on a bike.
 TimeoutStopSec=10
 

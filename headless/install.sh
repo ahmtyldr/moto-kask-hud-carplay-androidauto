@@ -62,7 +62,11 @@ SCANNER=$(find "$ARCHLIB" /usr/libexec -name gst-plugin-scanner 2>/dev/null | he
 if [ -n "$SCANNER" ] && command -v gst-launch-1.0 >/dev/null; then
   sudo mkdir -p "$GST_ROOT/bin" "$GST_ROOT/libexec/gstreamer-1.0"
   sudo ln -sf "$(command -v gst-launch-1.0)" "$GST_ROOT/bin/gst-launch-1.0"
-  sudo ln -sf "$(command -v gst-device-monitor-1.0)" "$GST_ROOT/bin/gst-device-monitor-1.0"
+  # Debian does not always ship gst-device-monitor-1.0; a dangling symlink makes
+  # the device enumerator spawn ENOENT on every start.
+  if command -v gst-device-monitor-1.0 >/dev/null; then
+    sudo ln -sf "$(command -v gst-device-monitor-1.0)" "$GST_ROOT/bin/gst-device-monitor-1.0"
+  fi
   sudo ln -sfn "$ARCHLIB" "$GST_ROOT/lib"
   sudo ln -sf "$SCANNER" "$GST_ROOT/libexec/gstreamer-1.0/gst-plugin-scanner"
   sudo chown -R livi:livi "$DEST/resources/gstreamer"
@@ -103,6 +107,20 @@ sudo visudo -cf /etc/sudoers.d/010-livi-headless
 # neither XDG_RUNTIME_DIR nor the pulse path, so playback dies with "Connection
 # refused" even though the sink is there and unmuted. Linger keeps the user
 # session — and pipewire-pulse with it — alive with nobody logged in.
+# GStreamer's plugin registry and Node's compile cache live here. Without a
+# persistent registry GStreamer rescans every plugin on each boot — 6.8 s of a
+# 18 s startup, measured on a Pi 3B+ — and because the Pi has no RTC the clock
+# is behind at boot, so the registry looks stale and is rebuilt every time.
+# The service therefore runs with GST_REGISTRY_UPDATE=no, which means the
+# registry has to be primed here, once, while the clock is correct.
+sudo install -d -o livi -g livi /var/cache/livi
+echo "==> priming the GStreamer registry"
+sudo -u livi env GST_REGISTRY_1_0=/var/cache/livi/gst-registry.bin \
+  GST_PLUGIN_SYSTEM_PATH="" \
+  GST_PLUGIN_PATH="$GST_ROOT/lib/gstreamer-1.0" \
+  GST_PLUGIN_SCANNER="$GST_ROOT/libexec/gstreamer-1.0/gst-plugin-scanner" \
+  gst-inspect-1.0 >/dev/null 2>&1 || echo "!!! registry olusturulamadi — acilis yavas kalir" >&2
+
 echo "==> user audio session (linger + runtime socket)"
 sudo loginctl enable-linger livi
 LIVI_UID=$(id -u livi)
