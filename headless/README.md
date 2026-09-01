@@ -165,6 +165,22 @@ selects, right is Back, middle is Home. `LIVI_INPUT_MODE=touch` restores
 absolute touch (for a touchscreen, or CarPlay, which negotiates input
 separately); `LIVI_INPUT_BRIDGE=0` disables the bridge.
 
+## Appliance boot
+
+The stock cmdline sends the kernel console to tty1 — the HDMI panel — so fsck
+output, kernel messages and systemd's "Starting ..." lines are printed over the
+screen the rider looks at; `quiet` and `loglevel=0` do not stop them on their
+own. `quiet-boot.sh` moves the console to tty3, turns off systemd's status
+output and masks the tty1 login prompt, leaving the panel blank until the idle
+screen takes it:
+
+```bash
+./quiet-boot.sh && sudo reboot
+```
+
+Messages are not lost, only moved: `journalctl` over SSH, or tty3 with a
+keyboard. The script keeps `cmdline.txt.pre-quiet`; copy it back to undo.
+
 ## Configuration
 
 There is no UI. `~/.config/LIVI/config.json` is written on first run and holds
