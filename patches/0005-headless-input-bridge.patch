@@ -33,10 +33,10 @@ index ddc7288..10c5c42 100644
    console.log('[headless] projection armed — waiting for a phone')
 diff --git a/src/main/headless/inputBridge.ts b/src/main/headless/inputBridge.ts
 new file mode 100644
-index 0000000..9145111
+index 0000000..011c466
 --- /dev/null
 +++ b/src/main/headless/inputBridge.ts
-@@ -0,0 +1,305 @@
+@@ -0,0 +1,312 @@
 +/**
 + * USB/evdev input bridge for the headless appliance.
 + *
@@ -47,24 +47,31 @@ index 0000000..9145111
 + * had sent them. Zero LIVI changes, zero dependencies; event-driven, so idle
 + * cost is nil.
 + *
-+ * Touch-first, and that is a hardware finding, not a preference: on this unit
-+ * Android Auto acts on touch events and ignores D-Pad/rotary keys (they reach
-+ * the phone — [INPUT] confirms the keycode is sent — and nothing moves). Only
-+ * touch produces visible feedback, so every gesture here is expressed as touch.
++ * Rotary-first, and every word of that is a hardware finding rather than a
++ * preference. Measured on this unit with Android Auto:
 + *
-+ * There is also no cursor: kmssink owns the display and nothing composites an
-+ * overlay on top, so an absolute pointer is invisible. The way to see where you
-+ * are is to hold the left button — the phone highlights what is under the
-+ * finger and follows the drag — then release to click.
++ *   - Touch works, but there is no cursor to aim it with: kmssink owns the
++ *     display and nothing composites an overlay, so an absolute pointer is
++ *     invisible and you click blind.
++ *   - D-Pad keys reach the phone ([INPUT] logs the keycode) and do nothing at
++ *     all, in either announcement mode.
++ *   - Rotary ticks move Android Auto's own focus ring — visible feedback, no
++ *     cursor needed — but ONLY once the head unit stops announcing a
++ *     touchscreen (patch 0006 / LIVI_AA_TOUCHSCREEN=0). While a touchscreen is
++ *     advertised the phone renders the touch UI and shows no focus at all.
 + *
-+ *   wheel               → scroll gesture (down/move/up swipe)
-+ *   left button hold    → finger down, drag follows the mouse, release = click
-+ *   right / middle      → Back / Home (key commands, best effort)
-+ *   arrows + Enter      → D-Pad + Select (best effort; see above)
-+ *   Space / N / P / V   → play-pause, next, prev, voice assistant
++ * So navigation is one-dimensional, the way a BMW/Mazda controller works:
 + *
-+ * LIVI_INPUT_MODE=dpad switches movement to direction keys instead, for a unit
-+ * whose phone does honour them. LIVI_INPUT_BRIDGE=0 disables the bridge.
++ *   mouse right or down  → rotary forward   (focus to the next element)
++ *   mouse left or up     → rotary backward
++ *   wheel                → the same ticks
++ *   left button          → Select (DPAD_CENTER)
++ *   right / middle       → Back / Home
++ *   arrows + Enter       → best effort; the phone ignores D-Pad here
++ *   Space / N / P / V    → play-pause, next, prev, voice assistant
++ *
++ * LIVI_INPUT_MODE=touch restores absolute touch (a touchscreen, or CarPlay,
++ * which negotiates its input separately). LIVI_INPUT_BRIDGE=0 disables this.
 + */
 +import { createReadStream, readdirSync } from 'node:fs'
 +import { ipcMain } from 'electron'
@@ -138,7 +145,7 @@ index 0000000..9145111
 +const MOVE_THROTTLE_MS = 16 // ~60 Hz drag updates, touch mode only
 +
 +export class InputBridge {
-+  private readonly dpadMode = process.env.LIVI_INPUT_MODE === 'dpad'
++  private readonly touchMode = process.env.LIVI_INPUT_MODE === 'touch'
 +  private cx: number
 +  private cy: number
 +  private accumX = 0
@@ -164,8 +171,8 @@ index 0000000..9145111
 +    this.rescan = setInterval(() => this.scan(), 5000)
 +    this.rescan.unref()
 +    console.log(
-+      `[input] evdev bridge armed (${this.touchMode ? 'touch mode' : 'dpad mode'}: ` +
-+        'mouse=direction, wheel=up/down, left=select, right=back)'
++      `[input] evdev bridge armed (${this.touchMode ? 'touch' : 'rotary'} mode: ` +
++        'mouse+wheel=focus, left=select, right=back)'
 +    )
 +  }
 +
@@ -224,19 +231,20 @@ index 0000000..9145111
 +  private onEvent(type: number, code: number, value: number): void {
 +    if (type === EV_REL) {
 +      if (code === REL_X || code === REL_Y) {
-+        if (this.dpadMode) return this.directionalMove(code, value)
-+        return this.pointerMove(code, value)
++        if (this.touchMode) return this.pointerMove(code, value)
++        return this.directionalMove(code, value)
 +      }
 +      if (code === REL_WHEEL && value !== 0) {
-+        // A key would be dropped by the phone; a swipe is what actually scrolls.
-+        if (this.dpadMode) this.command(value > 0 ? CMD.up : CMD.down)
-+        else this.swipe(value > 0 ? -1 : 1)
++        // Rotary ticks, not keys: the phone drops D-Pad. In touch mode there
++        // are no keys to send either, so synthesise the scroll gesture.
++        if (this.touchMode) this.swipe(value > 0 ? -1 : 1)
++        else this.command(value > 0 ? CMD.left : CMD.right)
 +      }
 +      return
 +    }
 +    if (type === EV_KEY) {
 +      if (code === BTN_LEFT) {
-+        if (!this.dpadMode) {
++        if (this.touchMode) {
 +          if (value === 1) {
 +            this.buttonDown = true
 +            this.touch(TOUCH_DOWN)
@@ -259,7 +267,7 @@ index 0000000..9145111
 +    }
 +  }
 +
-+  /** Accumulate motion and emit one direction key per threshold crossed. */
++  /** Accumulate motion and emit one rotary tick per threshold crossed. */
 +  private directionalMove(code: number, value: number): void {
 +    if (code === REL_X) this.accumX += value
 +    else this.accumY += value
@@ -272,13 +280,12 @@ index 0000000..9145111
 +    if (now - this.lastStep < STEP_MIN_INTERVAL_MS) return
 +    this.lastStep = now
 +
-+    // Whichever axis travelled further wins, so a diagonal drift does not
-+    // fire two directions at once.
-+    if (Math.abs(this.accumX) >= Math.abs(this.accumY)) {
-+      this.command(this.accumX > 0 ? CMD.right : CMD.left)
-+    } else {
-+      this.command(this.accumY > 0 ? CMD.down : CMD.up)
-+    }
++    // The focus ring is one ordered list, so both axes drive the same tick:
++    // right/down step forward, left/up step back. Whichever axis travelled
++    // further decides, so diagonal drift cannot fire twice.
++    const forward =
++      Math.abs(this.accumX) >= Math.abs(this.accumY) ? this.accumX > 0 : this.accumY > 0
++    this.command(forward ? CMD.right : CMD.left)
 +    this.accumX = 0
 +    this.accumY = 0
 +  }

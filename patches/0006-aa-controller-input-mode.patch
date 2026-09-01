@@ -1,0 +1,20 @@
+diff --git a/src/main/services/projection/driver/aa/stack/session/ServiceDiscoveryBuilder.ts b/src/main/services/projection/driver/aa/stack/session/ServiceDiscoveryBuilder.ts
+index 3b7041b..f143d0a 100644
+--- a/src/main/services/projection/driver/aa/stack/session/ServiceDiscoveryBuilder.ts
++++ b/src/main/services/projection/driver/aa/stack/session/ServiceDiscoveryBuilder.ts
+@@ -320,7 +320,14 @@ export function buildServiceDiscoveryResponse(
+         79, 82, 84, 85, 86, 87, 88, 89, 90, 91, 111, 126, 127, 164, 219, 231, 260, 261, 262, 263,
+         65536
+       ],
+-      touchscreen: [{ width: touchW, height: touchH }]
++      // Announcing a touchscreen puts Android Auto in its touch UI, where the
++      // focus ring is never drawn and D-Pad keys do nothing — on a headless
++      // unit that leaves no visible way to navigate, because kmssink owns the
++      // display and no cursor can be composited over the video. Dropping the
++      // touchscreen makes the phone treat this as a controller-driven head
++      // unit: it draws the focus ring itself and acts on rotary ticks.
++      // Measured on a Pi 3B+; see headless/README.md.
++      touchscreen: process.env.LIVI_AA_TOUCHSCREEN === '0' ? [] : [{ width: touchW, height: touchH }]
+     }
+   })
+ 

@@ -50,15 +50,30 @@ hiçbir davranış değiştirmez. Detay: `headless/statusui/README.md`.
 
 ## 0005-headless-input-bridge.patch
 
-Headless sürüme (0004'ün üstüne uygulanır) USB girdi köprüsü ekler:
-`src/main/headless/inputBridge.ts` `/dev/input/event*` cihazlarını doğrudan okur
-ve olayları shim'in `ipcMain`'i üzerinden LIVI'nin kendi `projection-touch` /
-`projection-command` dinleyicilerine verir (ProjectionService bunları zaten
-kaydediyor — sıfır LIVI değişikliği). Fare = dokunma/sürükleme, tekerlek = knob,
-sağ tuş = geri; klavye okları = D-Pad, Enter = seç, Boşluk = oynat/duraklat,
-V = sesli asistan. `LIVI_INPUT_BRIDGE=0` ile kapatılır. Bilinen sınır: imleç
-çizilmez (ekranın sahibi kmssink) — tekerlek/klavye akışı bu yüzden en kullanışlı
-yol, AA odak halkasını kendisi gösterir.
+Headless sürüme (0004'ün üstüne) USB girdi köprüsü ekler:
+`src/main/headless/inputBridge.ts` `/dev/input/event*` cihazlarını okur ve
+olayları shim'in `ipcMain`'i üzerinden LIVI'nin kendi `projection-touch` /
+`projection-command` dinleyicilerine verir — sıfır LIVI değişikliği.
+
+Eşleme donanımda ölçülerek seçildi (Pi 3B+, Android Auto): dokunma çalışıyor
+ama imleç çizilemediği için körlemesine kalıyor, D-Pad tuşları telefona ulaşıp
+hiçbir şey yapmıyor, **rotary tıkları ise odak halkasını gezdiriyor** — yeter ki
+ünite dokunmatik olduğunu duyurmasın (0006). Bu yüzden gezinme tek boyutlu:
+fare sağa/aşağı ve tekerlek odağı ileri, sola/yukarı geri taşır; sol tık seçer,
+sağ tık geri, orta tık ana ekran. `LIVI_INPUT_MODE=touch` mutlak dokunmaya
+döner, `LIVI_INPUT_BRIDGE=0` köprüyü kapatır.
+
+Not: `SendCommand` komut ADI bekler (`CommandMapping[value]`); sayı verilirse
+ters çevrilip sessizce düşer.
+
+## 0006-aa-controller-input-mode.patch
+
+Android Auto'ya "dokunmatik ekranım var" demeyi `LIVI_AA_TOUCHSCREEN=0` ile
+kapatılabilir yapar (varsayılan davranış değişmez). Kapatıldığında telefon
+üniteyi döner kumandalı araç gibi görür ve **odak halkasını kendisi çizer** —
+imleç çizilemeyen headless kurulumda ekranda gezinmenin tek görünür yolu budur.
+Pi 3B+'ta ölçüldü: dokunmatik duyurulurken D-Pad tuşları telefona ulaşıp hiçbir
+şey yapmıyor, odak halkası hiç çıkmıyor.
 
 ## Terminoloji notları
 

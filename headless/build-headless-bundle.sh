@@ -25,7 +25,7 @@ echo "### [3/6] clone LIVI v8.3.0 + patches"
 cd /root
 git clone -q --depth 1 --branch v8.3.0 https://github.com/f-io/LIVI.git 2>/dev/null
 cd LIVI
-for p in 0002 0003 0004 0005; do
+for p in 0002 0003 0004 0005 0006; do
   echo "  applying $p"
   git apply /host/patches/${p}-*.patch
 done

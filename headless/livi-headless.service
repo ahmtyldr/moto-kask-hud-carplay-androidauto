@@ -18,6 +18,16 @@ Environment=NODE_ENV=production
 # against. This is the whole point of the headless build.
 Environment=GST_GL_WINDOW=surfaceless
 Environment=GST_GL_PLATFORM=egl
+# waylandsink cannot start without a compositor, and plain kmssink fails its
+# first page flip with "Device or resource busy"; force-modesetting takes the
+# CRTC properly. Both measured on a Pi 3B+.
+Environment="LIVI_GST_SINK=kmssink force-modesetting=true"
+# No cursor can be drawn over the video, so navigation is the phone's own focus
+# ring driven by rotary ticks — which requires not announcing a touchscreen
+# (patch 0006). The two settings only make sense together.
+Environment=LIVI_AA_TOUCHSCREEN=0
+# A wedged pipeline must not hold up a power-down on a bike.
+TimeoutStopSec=10
 
 ExecStart=/usr/bin/node /opt/livi/livi-headless.cjs
 

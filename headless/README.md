@@ -106,19 +106,30 @@ already been detected.
 
 ## Status
 
-Verified in an arm64 container: builds, starts, probes codecs, opens the CarPlay
-listener on :7000, scans USB, shuts down cleanly.
+Verified on a Raspberry Pi 3B+ (2026-09-01): wireless and wired Android Auto,
+hardware H.264 decode with zero-copy dmabuf to `kmssink`, audio out of the
+3.5 mm jack, navigation and media metadata, the idle screen handing the display
+over and taking it back, and mouse navigation through the phone's focus ring.
 
 ```
-[headless] resources: /opt/livi/resources
-[CodecCapability] GStreamer codecs: h264(hw=false sw=true) h265(hw=false sw=true)
-[CpManager] listening on :7000 (dual-stack)
-[headless] projection armed — waiting for a phone
+[CodecCapability] GStreamer codecs: h264(hw=true sw=true) h265(hw=false sw=true)
+[gst_video] codec=h264 decoder=v4l2h264dec (hw) | ... ! kmssink force-modesetting=true
+[gst_video] decoded format=DMA_DRM drm=YU12 1280x720 mem=memory:DMABuf
+[wifi_ap] AP up — SSID='livi'  IP=10.10.0.1  channel=36
+[input] evdev bridge armed (rotary mode: mouse+wheel=focus, left=select, right=back)
 ```
 
-**Not yet verified on real hardware.** `hw=false` above is the container having
-no V4L2 devices; on a Pi the probe should find `v4l2h264dec`. Whether a phone
-actually connects and paints a frame is untested.
+Measured during a session, against the Electron build's numbers from
+`docs/pi3-video-fix.md`:
+
+| | Electron + videoconvert | Headless + dmabuf |
+|---|---|---|
+| CPU | ~90 % of four cores | **~16 %** |
+| Memory | 561 MB of 855 | **279 MB** |
+| Temperature | 63 → 67 °C, throttling | **53 °C** |
+
+Not yet verified: CarPlay (the stack comes up — iAP2 profiles, `:7000`, wired
+watcher — but no dongle or iPhone has been connected).
 
 ## Idle screen (optional)
 
@@ -130,15 +141,29 @@ kmssink can take the display, respawned on disconnect). Build and shipping:
 [statusui/README.md](statusui/README.md). If the binary is not in the package,
 everything behaves exactly as before.
 
-## Input (optional)
+## Input
 
 `patches/0005-headless-input-bridge.patch` reads evdev directly and feeds
 LIVI's own `projection-touch`/`projection-command` IPC listeners through the
-shim's ipcMain: mouse = touch/drag, wheel = knob, right-click = Back, keyboard
-arrows/Enter = D-Pad/Select, Space = play/pause, V = voice assistant. No
-pointer is drawn (kmssink owns the display), so wheel/keyboard — which AA
-answers with its own focus ring — is the usable idiom; a cursor overlay would
-need the DRM cursor plane from the gst host. Disable with `LIVI_INPUT_BRIDGE=0`.
+shim's ipcMain. What that input has to *be* was decided by the hardware, not by
+taste — measured on a Pi 3B+ with Android Auto:
+
+| Input | Result |
+|---|---|
+| Touch | Works, but there is no cursor to aim with — kmssink owns the display and nothing can composite an overlay over the video |
+| D-Pad keys | Reach the phone (`[INPUT] → dpad keycode 20 press+release`) and do nothing, in either announcement mode |
+| Rotary ticks | Move Android Auto's own focus ring — **but only once the head unit stops announcing a touchscreen** |
+
+Hence `patches/0006-aa-controller-input-mode.patch`: with
+`LIVI_AA_TOUCHSCREEN=0` the Service Discovery Response omits the touchscreen,
+the phone treats the unit as controller-driven, and it draws the focus ring
+itself. That is what makes a headless unit navigable without a cursor.
+
+Navigation is therefore one-dimensional, like a BMW/Mazda controller: mouse
+right/down and wheel step the focus forward, left/up step back, left button
+selects, right is Back, middle is Home. `LIVI_INPUT_MODE=touch` restores
+absolute touch (for a touchscreen, or CarPlay, which negotiates input
+separately); `LIVI_INPUT_BRIDGE=0` disables the bridge.
 
 ## Configuration
 
