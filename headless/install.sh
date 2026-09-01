@@ -42,7 +42,33 @@ sudo rm -rf "$DEST"
 sudo mkdir -p "$DEST"
 sudo cp -r "$PKG"/. "$DEST"/
 sudo chown -R livi:livi "$DEST"
-sudo chmod 0755 "$DEST/resources/driver/livi-helperd"
+# v8.3.0 ships the privileged helper as Python (livi-helper.py), not livi-helperd.
+sudo chmod 0755 "$DEST/resources/driver/helper/livi-helper.py"
+# Optional LVGL idle screen (headless/statusui); absent is fine.
+if [ -f "$DEST/statusui/livi-statusui" ]; then
+  sudo chmod 0755 "$DEST/statusui/livi-statusui"
+fi
+
+# AudioOutput.ts runs <resources>/gstreamer/<platform>/bin/gst-launch-1.0 and, if
+# that path is missing, logs "Bundled GStreamer not found" and returns — there is
+# no system fallback the way the video path has one, so audio stays silent while
+# everything else works. The AppImage ships that tree; this package does not.
+# A directory of symlinks satisfies both the existsSync() probe and gstEnv(),
+# which derives LD_LIBRARY_PATH, GST_PLUGIN_PATH and the scanner path from it.
+echo "==> GStreamer bridge for audio output"
+GST_ROOT="$DEST/resources/gstreamer/linux-arm64"
+ARCHLIB=/usr/lib/aarch64-linux-gnu
+SCANNER=$(find "$ARCHLIB" /usr/libexec -name gst-plugin-scanner 2>/dev/null | head -1)
+if [ -n "$SCANNER" ] && command -v gst-launch-1.0 >/dev/null; then
+  sudo mkdir -p "$GST_ROOT/bin" "$GST_ROOT/libexec/gstreamer-1.0"
+  sudo ln -sf "$(command -v gst-launch-1.0)" "$GST_ROOT/bin/gst-launch-1.0"
+  sudo ln -sf "$(command -v gst-device-monitor-1.0)" "$GST_ROOT/bin/gst-device-monitor-1.0"
+  sudo ln -sfn "$ARCHLIB" "$GST_ROOT/lib"
+  sudo ln -sf "$SCANNER" "$GST_ROOT/libexec/gstreamer-1.0/gst-plugin-scanner"
+  sudo chown -R livi:livi "$DEST/resources/gstreamer"
+else
+  echo "!!! gst-launch-1.0 / gst-plugin-scanner bulunamadi — ses calismaz" >&2
+fi
 
 echo "==> USB access for phones (AOAP re-enumerates under Google's vendor id)"
 sudo tee /etc/udev/rules.d/51-livi-usb.rules >/dev/null <<'EOF'
@@ -64,13 +90,32 @@ sudo udevadm control --reload-rules
 sudo udevadm trigger --subsystem-match=usb
 
 echo "==> passwordless sudo for the Wi-Fi AP helper"
-sudo tee /etc/sudoers.d/010-livi-headless >/dev/null <<'EOF'
-livi ALL=(root) NOPASSWD: /opt/livi/resources/driver/livi-helperd
+# Same shape as LIVI's own sudoers template: python3 + the helper script path.
+# The trailing * covers the helper's own arguments.
+PY="$(command -v python3)"
+sudo tee /etc/sudoers.d/010-livi-headless >/dev/null <<EOF
+livi ALL=(root) NOPASSWD: $PY /opt/livi/resources/driver/helper/livi-helper.py*
 EOF
 sudo chmod 0440 /etc/sudoers.d/010-livi-headless
+sudo visudo -cf /etc/sudoers.d/010-livi-headless
+
+# pulsesink reaches PipeWire over the user runtime socket. A system service has
+# neither XDG_RUNTIME_DIR nor the pulse path, so playback dies with "Connection
+# refused" even though the sink is there and unmuted. Linger keeps the user
+# session — and pipewire-pulse with it — alive with nobody logged in.
+echo "==> user audio session (linger + runtime socket)"
+sudo loginctl enable-linger livi
+LIVI_UID=$(id -u livi)
 
 echo "==> service"
 sudo cp "$UNIT_SRC" /etc/systemd/system/$SERVICE
+sudo mkdir -p /etc/systemd/system/$SERVICE.d
+sudo tee /etc/systemd/system/$SERVICE.d/audio.conf >/dev/null <<EOF
+[Service]
+Environment=XDG_RUNTIME_DIR=/run/user/$LIVI_UID
+Environment=PULSE_RUNTIME_PATH=/run/user/$LIVI_UID/pulse
+Environment=PULSE_SERVER=unix:/run/user/$LIVI_UID/pulse/native
+EOF
 sudo systemctl daemon-reload
 sudo systemctl enable $SERVICE
 
