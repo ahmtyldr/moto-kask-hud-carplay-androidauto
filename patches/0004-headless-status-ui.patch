@@ -1,0 +1,181 @@
+diff --git a/src/main/headless/index.ts b/src/main/headless/index.ts
+index 3138a1e..ddc7288 100644
+--- a/src/main/headless/index.ts
++++ b/src/main/headless/index.ts
+@@ -23,23 +23,43 @@ import { loadConfig } from '@main/config/loadConfig'
+ import { ProjectionService } from '@main/services/projection/services/ProjectionService'
+ import { USBService } from '@main/services/usb/USBService'
+ import { setStreamGamma } from '@main/services/video/GstVideo'
++import { StatusUi } from './statusUi'
+ 
+ /**
+  * ProjectionService pushes events at a renderer's WebContents. Nothing is
+  * listening here, but two call sites gate on hasRenderer() (DongleState,
+  * BtPairedRegistry), so attach a sink that satisfies the interface. This is also
+- * the seam where a phone-served UI would plug in later: forward instead of drop.
++ * the seam other UIs plug into: the LVGL idle screen rides it today, a
++ * phone-served settings page would tomorrow.
+  */
+-function createEventSink(verbose: boolean): { send: (ch: string, ...a: unknown[]) => void; id: number } {
++function createEventSink(
++  verbose: boolean,
++  statusUi: StatusUi
++): { send: (ch: string, ...a: unknown[]) => void; id: number; isDestroyed: () => boolean } {
+   return {
+     id: 0,
++    // ProjectionService.onActiveSessionChanged calls wc.isDestroyed() on session
++    // close; without it the emit throws and takes the whole process down.
++    isDestroyed: (): boolean => false,
+     send: (channel: string, ...args: unknown[]): void => {
++      statusUi.onEvent(channel, args)
+       if (!verbose) return
+       console.log(`[event] ${channel}`, ...args.map((a) => JSON.stringify(a)?.slice(0, 300)))
+     }
+   }
+ }
+ 
++// Appliance rule: a stray failure must not take down an active projection.
++// Seen in the field: node-usb's WebUSB deviceConnectCallback throws EACCES for
++// any attached device without a udev rule, and the uncaught error killed the
++// session. Log and carry on; genuinely fatal states will fail again immediately.
++process.on('uncaughtException', (err) => {
++  console.error('[headless] uncaught exception (continuing):', err)
++})
++process.on('unhandledRejection', (reason) => {
++  console.error('[headless] unhandled rejection (continuing):', reason)
++})
++
+ async function main(): Promise<void> {
+   const config = loadConfig()
+   setDebugLogging(config.debugLogging === true)
+@@ -53,8 +73,9 @@ async function main(): Promise<void> {
+ 
+   const projectionService = new ProjectionService()
+   const usbService = new USBService(projectionService)
++  const statusUi = new StatusUi()
+ 
+-  projectionService.attachRenderer(createEventSink(verbose) as never)
++  projectionService.attachRenderer(createEventSink(verbose, statusUi) as never)
+ 
+   // Display calibration lives in the video pipeline, not the UI, so it still applies.
+   setStreamGamma(
+@@ -76,6 +97,7 @@ async function main(): Promise<void> {
+     stopping = true
+     console.log(`[headless] ${signal} — stopping`)
+     try {
++      statusUi.stop()
+       usbService.beginShutdown()
+       projectionService.beginShutdown()
+       await Promise.race([
+@@ -91,6 +113,7 @@ async function main(): Promise<void> {
+   process.on('SIGTERM', () => void shutdown('SIGTERM'))
+ 
+   await projectionService.autoStartIfNeeded()
++  statusUi.show()
+   console.log('[headless] projection armed — waiting for a phone')
+ }
+ 
+diff --git a/src/main/headless/statusUi.ts b/src/main/headless/statusUi.ts
+new file mode 100644
+index 0000000..0ed7166
+--- /dev/null
++++ b/src/main/headless/statusUi.ts
+@@ -0,0 +1,98 @@
++/**
++ * Idle-screen manager: drives the LVGL status binary (livi-statusui).
++ *
++ * KMS allows a single display master, so the status screen may only live while
++ * no projection session holds the screen: show it at boot, kill it the moment
++ * video starts, bring it back when the session ends. The binary releases the
++ * DRM master simply by exiting, which is why hide() is a SIGTERM and not IPC.
++ *
++ * Lifecycle rides the renderer-event seam in index.ts. Verified on hardware
++ * (Pi 3B+, LIVI v8.3.0): every event arrives on the single channel
++ * 'projection-event' with a discriminating `type` field, and the video
++ * lifecycle signal is exactly
++ *
++ *     {"type":"projection","shown":true}    → video on screen: hide
++ *     {"type":"projection","shown":false}   → session gone: show again
++ *
++ * If the binary is missing (or LIVI_STATUSUI=0) everything here is a no-op —
++ * the appliance must never fail because its idle screen is absent.
++ */
++import { spawn, type ChildProcess } from 'node:child_process'
++import { existsSync } from 'node:fs'
++
++const BIN = process.env.LIVI_STATUSUI_BIN ?? '/opt/livi/statusui/livi-statusui'
++
++/** Event types worth echoing onto the idle screen while it is up. */
++const RELAY_TYPES = new Set(['bluetoothPairedList', 'devices', 'transportState'])
++
++type ProjectionEvent = { type?: string; shown?: boolean; payload?: unknown }
++
++export class StatusUi {
++  private child: ChildProcess | null = null
++  private enabled = process.env.LIVI_STATUSUI !== '0' && existsSync(BIN)
++  private lastSpawn = 0
++  private stopping = false
++
++  constructor() {
++    if (!this.enabled && process.env.LIVI_STATUSUI !== '0') {
++      console.log(`[statusui] disabled: no binary at ${BIN}`)
++    }
++  }
++
++  show(): void {
++    if (!this.enabled || this.stopping || this.child) return
++    const now = Date.now()
++    if (now - this.lastSpawn < 2000) return // crash-loop guard
++    this.lastSpawn = now
++    const child = spawn(BIN, [], { stdio: ['pipe', 'inherit', 'inherit'] })
++    child.on('exit', () => {
++      if (this.child === child) this.child = null
++    })
++    child.on('error', (err: Error) => {
++      console.error(`[statusui] failed to start: ${err.message}`)
++      this.enabled = false
++      if (this.child === child) this.child = null
++    })
++    this.child = child
++  }
++
++  hide(): void {
++    const child = this.child
++    this.child = null
++    child?.kill('SIGTERM')
++  }
++
++  /** One line of secondary text on the idle screen; trimmed, single line. */
++  message(text: string): void {
++    if (!this.child?.stdin?.writable) return
++    this.child.stdin.write(`msg ${text.replace(/\s+/g, ' ').trim().slice(0, 120)}\n`)
++  }
++
++  onEvent(channel: string, args: unknown[]): void {
++    if (channel !== 'projection-event') return
++    const ev = args[0] as ProjectionEvent | undefined
++    if (!ev || typeof ev !== 'object') return
++
++    if (ev.type === 'projection') {
++      if (ev.shown) this.hide()
++      else this.show()
++      return
++    }
++    // Defensive: a session count of zero also means nothing owns the screen.
++    if (ev.type === 'session' && (ev as { total?: number }).total === 0) {
++      this.show()
++      return
++    }
++    if (ev.type && RELAY_TYPES.has(ev.type)) {
++      if (ev.type === 'devices' && Array.isArray(ev.payload) && ev.payload[0]) {
++        const d = ev.payload[0] as { name?: string; status?: string }
++        if (d.name) this.message(`${d.name}: ${d.status ?? ''}`)
++      }
++    }
++  }
++
++  stop(): void {
++    this.stopping = true
++    this.hide()
++  }
++}
