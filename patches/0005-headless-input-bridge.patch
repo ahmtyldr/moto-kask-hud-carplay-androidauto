@@ -1,0 +1,344 @@
+diff --git a/src/main/headless/index.ts b/src/main/headless/index.ts
+index ddc7288..10c5c42 100644
+--- a/src/main/headless/index.ts
++++ b/src/main/headless/index.ts
+@@ -23,6 +23,7 @@ import { loadConfig } from '@main/config/loadConfig'
+ import { ProjectionService } from '@main/services/projection/services/ProjectionService'
+ import { USBService } from '@main/services/usb/USBService'
+ import { setStreamGamma } from '@main/services/video/GstVideo'
++import { InputBridge } from './inputBridge'
+ import { StatusUi } from './statusUi'
+ 
+ /**
+@@ -97,6 +98,7 @@ async function main(): Promise<void> {
+     stopping = true
+     console.log(`[headless] ${signal} — stopping`)
+     try {
++      inputBridge.stop()
+       statusUi.stop()
+       usbService.beginShutdown()
+       projectionService.beginShutdown()
+@@ -112,6 +114,12 @@ async function main(): Promise<void> {
+   process.on('SIGINT', () => void shutdown('SIGINT'))
+   process.on('SIGTERM', () => void shutdown('SIGTERM'))
+ 
++  // USB mouse/keyboard → AA touch/dpad. ProjectionService registered its
++  // 'projection-touch'/'projection-command' listeners on the shim's ipcMain
++  // (ProjectionService.ts:1144), so the bridge just emits on those channels.
++  const inputBridge = new InputBridge(config.projectionWidth ?? 1280, config.projectionHeight ?? 720)
++  if (process.env.LIVI_INPUT_BRIDGE !== '0') inputBridge.start()
++
+   await projectionService.autoStartIfNeeded()
+   statusUi.show()
+   console.log('[headless] projection armed — waiting for a phone')
+diff --git a/src/main/headless/inputBridge.ts b/src/main/headless/inputBridge.ts
+new file mode 100644
+index 0000000..9145111
+--- /dev/null
++++ b/src/main/headless/inputBridge.ts
+@@ -0,0 +1,305 @@
++/**
++ * USB/evdev input bridge for the headless appliance.
++ *
++ * Reads Linux input devices (/dev/input/event*) directly and injects events
++ * through the SAME IPC channels the renderer would have used: the shim's
++ * ipcMain is a real EventEmitter, so ProjectionService's registered
++ * 'projection-touch' / 'projection-command' listeners fire exactly as if a UI
++ * had sent them. Zero LIVI changes, zero dependencies; event-driven, so idle
++ * cost is nil.
++ *
++ * Touch-first, and that is a hardware finding, not a preference: on this unit
++ * Android Auto acts on touch events and ignores D-Pad/rotary keys (they reach
++ * the phone — [INPUT] confirms the keycode is sent — and nothing moves). Only
++ * touch produces visible feedback, so every gesture here is expressed as touch.
++ *
++ * There is also no cursor: kmssink owns the display and nothing composites an
++ * overlay on top, so an absolute pointer is invisible. The way to see where you
++ * are is to hold the left button — the phone highlights what is under the
++ * finger and follows the drag — then release to click.
++ *
++ *   wheel               → scroll gesture (down/move/up swipe)
++ *   left button hold    → finger down, drag follows the mouse, release = click
++ *   right / middle      → Back / Home (key commands, best effort)
++ *   arrows + Enter      → D-Pad + Select (best effort; see above)
++ *   Space / N / P / V   → play-pause, next, prev, voice assistant
++ *
++ * LIVI_INPUT_MODE=dpad switches movement to direction keys instead, for a unit
++ * whose phone does honour them. LIVI_INPUT_BRIDGE=0 disables the bridge.
++ */
++import { createReadStream, readdirSync } from 'node:fs'
++import { ipcMain } from 'electron'
++
++const EV_KEY = 0x01
++const EV_REL = 0x02
++const REL_X = 0x00
++const REL_Y = 0x01
++const REL_WHEEL = 0x08
++const BTN_LEFT = 0x110
++const BTN_RIGHT = 0x111
++const BTN_MIDDLE = 0x112
++
++// struct input_event on 64-bit: timeval(16) + type(2) + code(2) + value(4)
++const EV_SIZE = 24
++
++// TouchAction (ProjectionEnums)
++const TOUCH_DOWN = 14
++const TOUCH_MOVE = 15
++const TOUCH_UP = 16
++
++// Command NAMES, not CommandMapping numbers: SendCommand does
++// `this.value = CommandMapping[value]`, so a name maps to its number while a
++// number reverse-maps to a string and then matches nothing — the command is
++// dropped with "not in buttonMap, no key sent". Cost us an evening.
++//
++// up/down reach AA as DPAD_UP/DPAD_DOWN;
++// left/right arrive as rotary ticks, which AA ignores unless the head unit was
++// announced as rotary-capable — so horizontal movement uses them only as a
++// best effort and vertical is what actually moves the focus.
++const CMD = {
++  left: 'left',
++  right: 'right',
++  up: 'up',
++  down: 'down',
++  selectDown: 'selectDown',
++  selectUp: 'selectUp',
++  back: 'back',
++  home: 'home',
++  playPause: 'playPause',
++  next: 'next',
++  prev: 'prev',
++  voiceAssistant: 'voiceAssistant',
++  voiceAssistantRelease: 'voiceAssistantRelease'
++} as const
++
++type Cmd = (typeof CMD)[keyof typeof CMD]
++
++// Keyboard scancodes (linux/input-event-codes.h) → command(s)
++const KEY_COMMANDS: Record<number, Cmd[]> = {
++  105: [CMD.left], // KEY_LEFT
++  106: [CMD.right], // KEY_RIGHT
++  103: [CMD.up], // KEY_UP
++  108: [CMD.down], // KEY_DOWN
++  28: [CMD.selectDown, CMD.selectUp], // KEY_ENTER
++  96: [CMD.selectDown, CMD.selectUp], // KEY_KPENTER
++  1: [CMD.back], // KEY_ESC
++  14: [CMD.back], // KEY_BACKSPACE
++  57: [CMD.playPause], // KEY_SPACE
++  49: [CMD.next], // KEY_N
++  25: [CMD.prev], // KEY_P
++  35: [CMD.home], // KEY_H
++  47: [CMD.voiceAssistant, CMD.voiceAssistantRelease] // KEY_V
++}
++
++/** Mouse counts to travel before the focus steps one cell. */
++const STEP_THRESHOLD = 45
++/** Floor on repeat rate so a fast flick cannot spray twenty steps at once. */
++const STEP_MIN_INTERVAL_MS = 110
++const MOUSE_ACCEL = 1.6
++const MOVE_THROTTLE_MS = 16 // ~60 Hz drag updates, touch mode only
++
++export class InputBridge {
++  private readonly dpadMode = process.env.LIVI_INPUT_MODE === 'dpad'
++  private cx: number
++  private cy: number
++  private accumX = 0
++  private accumY = 0
++  private lastStep = 0
++  private buttonDown = false
++  private swiping = false
++  private lastMoveSent = 0
++  private open = new Map<string, () => void>()
++  private rescan: NodeJS.Timeout | null = null
++
++  constructor(
++    private width = 1280,
++    private height = 720
++  ) {
++    this.cx = width / 2
++    this.cy = height / 2
++  }
++
++  start(): void {
++    this.scan()
++    // Hotplug: a mouse plugged in later should just start working.
++    this.rescan = setInterval(() => this.scan(), 5000)
++    this.rescan.unref()
++    console.log(
++      `[input] evdev bridge armed (${this.touchMode ? 'touch mode' : 'dpad mode'}: ` +
++        'mouse=direction, wheel=up/down, left=select, right=back)'
++    )
++  }
++
++  stop(): void {
++    if (this.rescan) clearInterval(this.rescan)
++    for (const close of this.open.values()) close()
++    this.open.clear()
++  }
++
++  private scan(): void {
++    let names: string[]
++    try {
++      names = readdirSync('/dev/input').filter((n) => /^event\d+$/.test(n))
++    } catch {
++      return
++    }
++    for (const name of names) {
++      if (this.open.has(name)) continue
++      this.attach(name)
++    }
++  }
++
++  private attach(name: string): void {
++    let carry = Buffer.alloc(0)
++    const stream = createReadStream(`/dev/input/${name}`)
++    const close = (): void => {
++      stream.destroy()
++      this.open.delete(name)
++    }
++    stream.on('data', (chunk: string | Buffer) => {
++      const chunkBuf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
++      const buf = carry.length ? Buffer.concat([carry, chunkBuf]) : chunkBuf
++      let off = 0
++      for (; off + EV_SIZE <= buf.length; off += EV_SIZE) {
++        try {
++          this.onEvent(
++            buf.readUInt16LE(off + 16),
++            buf.readUInt16LE(off + 18),
++            buf.readInt32LE(off + 20)
++          )
++        } catch (err) {
++          // One bad event must not tear down the stream — that failure mode
++          // looked exactly like "the mouse does nothing" during bring-up.
++          console.error('[input] event handler error:', err)
++        }
++      }
++      carry = buf.subarray(off)
++    })
++    // EACCES (not in input group) or a yanked device: drop it quietly,
++    // a rescan will retry if it reappears.
++    stream.on('error', close)
++    stream.on('close', () => this.open.delete(name))
++    this.open.set(name, close)
++  }
++
++  private onEvent(type: number, code: number, value: number): void {
++    if (type === EV_REL) {
++      if (code === REL_X || code === REL_Y) {
++        if (this.dpadMode) return this.directionalMove(code, value)
++        return this.pointerMove(code, value)
++      }
++      if (code === REL_WHEEL && value !== 0) {
++        // A key would be dropped by the phone; a swipe is what actually scrolls.
++        if (this.dpadMode) this.command(value > 0 ? CMD.up : CMD.down)
++        else this.swipe(value > 0 ? -1 : 1)
++      }
++      return
++    }
++    if (type === EV_KEY) {
++      if (code === BTN_LEFT) {
++        if (!this.dpadMode) {
++          if (value === 1) {
++            this.buttonDown = true
++            this.touch(TOUCH_DOWN)
++          } else if (value === 0 && this.buttonDown) {
++            this.buttonDown = false
++            this.touch(TOUCH_UP)
++          }
++        } else if (value === 1) {
++          this.command(CMD.selectDown)
++        } else if (value === 0) {
++          this.command(CMD.selectUp)
++        }
++        return
++      }
++      if (value !== 1) return // keyboard: act on press only, ignore repeat/release
++      if (code === BTN_RIGHT) return this.command(CMD.back)
++      if (code === BTN_MIDDLE) return this.command(CMD.home)
++      const cmds = KEY_COMMANDS[code]
++      if (cmds) for (const c of cmds) this.command(c)
++    }
++  }
++
++  /** Accumulate motion and emit one direction key per threshold crossed. */
++  private directionalMove(code: number, value: number): void {
++    if (code === REL_X) this.accumX += value
++    else this.accumY += value
++
++    const horizontal = Math.abs(this.accumX) >= STEP_THRESHOLD
++    const vertical = Math.abs(this.accumY) >= STEP_THRESHOLD
++    if (!horizontal && !vertical) return
++
++    const now = Date.now()
++    if (now - this.lastStep < STEP_MIN_INTERVAL_MS) return
++    this.lastStep = now
++
++    // Whichever axis travelled further wins, so a diagonal drift does not
++    // fire two directions at once.
++    if (Math.abs(this.accumX) >= Math.abs(this.accumY)) {
++      this.command(this.accumX > 0 ? CMD.right : CMD.left)
++    } else {
++      this.command(this.accumY > 0 ? CMD.down : CMD.up)
++    }
++    this.accumX = 0
++    this.accumY = 0
++  }
++
++  private pointerMove(code: number, value: number): void {
++    if (code === REL_X) this.cx = clamp(this.cx + value * MOUSE_ACCEL, 0, this.width - 1)
++    else this.cy = clamp(this.cy + value * MOUSE_ACCEL, 0, this.height - 1)
++    if (!this.buttonDown) return
++    const now = Date.now()
++    if (now - this.lastMoveSent < MOVE_THROTTLE_MS) return
++    this.lastMoveSent = now
++    this.touch(TOUCH_MOVE)
++  }
++
++  /**
++   * A scroll wheel click has no touch equivalent, so synthesise the gesture a
++   * finger would make: press, drag across the middle of the screen, release.
++   * Sent over ~120 ms — an instant jump reads as a stray tap and scrolls
++   * nothing.
++   */
++  private swipe(dir: -1 | 1): void {
++    if (this.swiping) return
++    this.swiping = true
++    const x = this.cx / this.width
++    const startY = 0.5 - dir * 0.18
++    const endY = 0.5 + dir * 0.18
++    const steps = 6
++    let i = 0
++    this.emitTouch(x, startY, TOUCH_DOWN)
++    const timer = setInterval(() => {
++      i++
++      const y = startY + (endY - startY) * (i / steps)
++      if (i >= steps) {
++        clearInterval(timer)
++        this.emitTouch(x, endY, TOUCH_UP)
++        this.swiping = false
++      } else {
++        this.emitTouch(x, y, TOUCH_MOVE)
++      }
++    }, 20)
++  }
++
++  private emitTouch(x: number, y: number, action: number): void {
++    ipcMain.emit('projection-touch', null, { x, y, action })
++  }
++
++  private touch(action: number): void {
++    ipcMain.emit('projection-touch', null, {
++      x: this.cx / this.width,
++      y: this.cy / this.height,
++      action
++    })
++  }
++
++  private command(value: Cmd): void {
++    ipcMain.emit('projection-command', null, value)
++  }
++}
++
++function clamp(v: number, lo: number, hi: number): number {
++  if (!Number.isFinite(v)) return lo
++  return v < lo ? lo : v > hi ? hi : v
++}
