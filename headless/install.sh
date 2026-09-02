@@ -114,12 +114,6 @@ sudo visudo -cf /etc/sudoers.d/010-livi-headless
 # The service therefore runs with GST_REGISTRY_UPDATE=no, which means the
 # registry has to be primed here, once, while the clock is correct.
 sudo install -d -o livi -g livi /var/cache/livi
-echo "==> priming the GStreamer registry"
-sudo -u livi env GST_REGISTRY_1_0=/var/cache/livi/gst-registry.bin \
-  GST_PLUGIN_SYSTEM_PATH="" \
-  GST_PLUGIN_PATH="$GST_ROOT/lib/gstreamer-1.0" \
-  GST_PLUGIN_SCANNER="$GST_ROOT/libexec/gstreamer-1.0/gst-plugin-scanner" \
-  gst-inspect-1.0 >/dev/null 2>&1 || echo "!!! registry olusturulamadi — acilis yavas kalir" >&2
 
 echo "==> user audio session (linger + runtime socket)"
 sudo loginctl enable-linger livi

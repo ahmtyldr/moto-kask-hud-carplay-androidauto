@@ -31,23 +31,26 @@ Environment="LIVI_GST_SINK=kmssink force-modesetting=true"
 # ring driven by rotary ticks — which requires not announcing a touchscreen
 # (patch 0006). The two settings only make sense together.
 Environment=LIVI_AA_TOUCHSCREEN=0
-# Without a writable registry GStreamer rescans every plugin on each start: the
-# codec probe alone took 6.8 s of boot, and 0.075 s once the registry persists.
-# gstEnv() spreads process.env, so setting it here reaches the probe and the
-# audio pipeline alike.
-Environment=GST_REGISTRY_1_0=/var/cache/livi/gst-registry.bin
-# And never rescan: the Pi has no RTC, so at boot the clock is behind and every
-# plugin looks newer than the registry, which invalidates it and costs the 6.8 s
-# again on each start. An appliance's plugin set does not change between boots;
-# install.sh primes the registry once, and `sudo -u livi GST_REGISTRY_UPDATE=""
-# gst-inspect-1.0 >/dev/null` refreshes it after any GStreamer package change.
-Environment=GST_REGISTRY_UPDATE=no
+# NO GStreamer registry pinning here, deliberately. It bought ~7 s of boot and
+# cost a full evening: a registry primed externally (gst-inspect over SSH) and
+# frozen with GST_REGISTRY_UPDATE=no fed gst-host broken element caps, and every
+# video pipeline died with not-negotiated (-4) while probe, session and audio
+# all looked healthy. If this is ever retried, the registry must be produced by
+# livi-gst-host itself, in this unit's exact environment — and verified with a
+# phone on screen before it is kept.
 # Same idea for the 1 MB bundle: Node 22+ caches compiled bytecode, which is
 # worth a second or so of a cold start on an A53.
 Environment=NODE_COMPILE_CACHE=/var/cache/livi/node
 # A wedged pipeline must not hold up a power-down on a bike.
 TimeoutStopSec=10
 
+# A cold boot leaves bluetoothd in a state where LIVI's helper registers its
+# profiles but RFCOMM data never flows: phones connect and give up ("connection
+# reset by peer", no WPP handshake). Seen after every hard power cut and on
+# cold boots; a bluetoothd restart right before we start fixed it every single
+# time, so do exactly that. "+" runs the step as root.
+ExecStartPre=+-/usr/bin/systemctl try-restart bluetooth.service
+ExecStartPre=/bin/sleep 2
 ExecStart=/usr/bin/node /opt/livi/livi-headless.cjs
 
 # The unit is the product: if projection dies, bring it back rather than leaving
