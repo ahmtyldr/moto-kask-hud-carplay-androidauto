@@ -91,6 +91,24 @@ docker run --rm -i --platform linux/arm64 \
   debian:trixie bash < headless/build-headless-bundle.sh
 ```
 
+## Installing — the single-file way
+
+`make-release.sh` packs the proven bundle, the installer, both units and the
+quiet-boot script into one self-extracting file. That file is the product:
+
+```bash
+headless/make-release.sh                 # → headless/release/livi-pi3-kurulum.run
+scp headless/release/livi-pi3-kurulum.run livi@<pi>:
+ssh livi@<pi> 'bash livi-pi3-kurulum.run'
+sudo reboot                              # sessiz acilis icin bir kez
+```
+
+The installer is offline-friendly: when every dependency is already present
+(a reinstall, or a field restore) it skips apt entirely; on a fresh card it
+pulls the packages and Node 24 itself. Verified end to end on a Pi 3B+: boots
+in 16 s to the idle screen, the phone reconnects wirelessly on its own, video
+plays. `LIVI_SKIP_QUIET_BOOT=1` leaves the boot console alone.
+
 ## Installing
 
 ```bash

@@ -14,3 +14,4 @@ logs/
 # Build output — produced by headless/build-headless-bundle.sh
 headless/dist-headless/
 headless/statusui/build/
+headless/release/

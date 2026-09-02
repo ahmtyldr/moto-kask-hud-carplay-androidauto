@@ -14,6 +14,16 @@ UNIT_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$SERVICE"
 [ -f "$PKG/livi-headless.cjs" ] || { echo "package not found at $PKG" >&2; exit 1; }
 [ "$(id -u)" -ne 0 ] || { echo "run as a regular user; sudo is used internally" >&2; exit 1; }
 
+# Offline-friendly: when every runtime dependency is already present (a
+# reinstall, or a restore in the field with no internet), skip apt entirely.
+DEPS_OK=1
+for c in gst-launch-1.0 hostapd bluetoothctl pipewire node; do
+  command -v "$c" >/dev/null || DEPS_OK=0
+done
+node --version 2>/dev/null | grep -qE 'v(2[4-9]|[3-9][0-9])' || DEPS_OK=0
+if [ "$DEPS_OK" = "1" ]; then
+  echo "==> runtime dependencies: hepsi mevcut, apt atlaniyor (cevrimdisi uyumlu)"
+else
 echo "==> runtime dependencies"
 sudo apt-get update
 sudo apt-get install -y --no-install-recommends \
@@ -25,11 +35,15 @@ sudo apt-get install -y --no-install-recommends \
   hostapd dnsmasq-base iw rfkill avahi-daemon \
   libusb-1.0-0
 
-node --version | grep -qE 'v(2[4-9]|[3-9][0-9])' || {
-  echo "Node 24+ required; got $(node --version)" >&2
-  echo "install from https://deb.nodesource.com/setup_24.x" >&2
-  exit 1
-}
+# Node 24+: Trixie's repo is older, so pull NodeSource automatically — the
+# single-file installer must not stop halfway and hand the user a URL.
+if ! node --version 2>/dev/null | grep -qE 'v(2[4-9]|[3-9][0-9])'; then
+  echo "==> Node 24 (NodeSource)"
+  curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash - >/dev/null
+  sudo apt-get install -y nodejs
+fi
+node --version | grep -qE 'v(2[4-9]|[3-9][0-9])' || { echo "Node 24 kurulamadi" >&2; exit 1; }
+fi
 
 echo "==> user and groups"
 id livi >/dev/null 2>&1 || sudo useradd -m -s /bin/bash livi
@@ -141,6 +155,13 @@ Environment=PULSE_SERVER=unix:/run/user/$LIVI_UID/pulse/native
 EOF
 sudo systemctl daemon-reload
 sudo systemctl enable $SERVICE
+
+# Production boot: nothing on the panel until the idle screen. Keeps a
+# .pre-quiet backup of cmdline.txt; skip with LIVI_SKIP_QUIET_BOOT=1.
+if [ "${LIVI_SKIP_QUIET_BOOT:-0}" != "1" ]; then
+  QB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/quiet-boot.sh"
+  [ -f "$QB" ] && bash "$QB"
+fi
 
 echo
 echo "installed. start it with:"
