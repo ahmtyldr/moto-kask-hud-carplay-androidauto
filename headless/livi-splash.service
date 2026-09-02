@@ -1,0 +1,36 @@
+[Unit]
+Description=LIVI idle screen (early boot)
+Documentation=https://github.com/ahmtyldr/moto-kask-hud-carplay-androidauto
+# As early as a unit can reasonably run: DRM is up once udev has settled, and
+# nothing else here wants the display. livi-headless takes over later — its
+# StatusUi adopts this process instead of starting a second one, because KMS
+# allows a single display master.
+After=systemd-udev-settle.service
+DefaultDependencies=no
+After=sysinit.target
+Before=livi-headless.service
+ConditionPathExists=/opt/livi/statusui/livi-statusui
+
+[Service]
+Type=simple
+User=livi
+Group=livi
+SupplementaryGroups=video render
+# livi-statusui exits on stdin EOF — that is how it knows its parent is gone —
+# and a service's stdin is /dev/null, which is EOF immediately. Hold a fifo open
+# for both read and write so no EOF ever arrives; writing a line into
+# /run/livi-splash.fifo also reaches the screen ("msg ...").
+# RuntimeDirectory gives us a livi-owned /run/livi-splash; a service user
+# cannot create anything in /run itself.
+RuntimeDirectory=livi-splash
+ExecStartPre=-/bin/sh -c 'mkfifo -m 0660 /run/livi-splash/fifo'
+ExecStart=/bin/sh -c 'exec 3<>/run/livi-splash/fifo; exec /opt/livi/statusui/livi-statusui <&3'
+# Exiting is how the DRM master is released, so a crash must not respawn into a
+# fight with the video pipeline.
+Restart=no
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=livi-splash
+
+[Install]
+WantedBy=sysinit.target

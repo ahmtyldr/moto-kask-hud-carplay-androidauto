@@ -127,6 +127,17 @@ LIVI_UID=$(id -u livi)
 
 echo "==> service"
 sudo cp "$UNIT_SRC" /etc/systemd/system/$SERVICE
+# Early idle screen: fills the panel ~6 s before Node has parsed the bundle.
+SPLASH_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/livi-splash.service"
+if [ -f "$SPLASH_SRC" ] && [ -f "$DEST/statusui/livi-statusui" ]; then
+  sudo cp "$SPLASH_SRC" /etc/systemd/system/livi-splash.service
+  sudo systemctl enable livi-splash.service >/dev/null 2>&1 || true
+fi
+
+# The boot partition is checked on every start (~1.3 s) for no real benefit on
+# an appliance that never writes to it outside an update. Check it on demand
+# instead: `sudo fsck.vfat /dev/mmcblk0p1` with the unit stopped.
+sudo sed -i -E 's|^(\S+\s+/boot/firmware\s+vfat\s+\S+\s+[0-9]+\s+)[0-9]+|\10|' /etc/fstab
 sudo mkdir -p /etc/systemd/system/$SERVICE.d
 sudo tee /etc/systemd/system/$SERVICE.d/audio.conf >/dev/null <<EOF
 [Service]

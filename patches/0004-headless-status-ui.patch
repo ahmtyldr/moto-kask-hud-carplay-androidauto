@@ -77,10 +77,10 @@ index 3138a1e..ddc7288 100644
  
 diff --git a/src/main/headless/statusUi.ts b/src/main/headless/statusUi.ts
 new file mode 100644
-index 0000000..0ed7166
+index 0000000..d4e2b13
 --- /dev/null
 +++ b/src/main/headless/statusUi.ts
-@@ -0,0 +1,98 @@
+@@ -0,0 +1,125 @@
 +/**
 + * Idle-screen manager: drives the LVGL status binary (livi-statusui).
 + *
@@ -97,10 +97,15 @@ index 0000000..0ed7166
 + *     {"type":"projection","shown":true}    → video on screen: hide
 + *     {"type":"projection","shown":false}   → session gone: show again
 + *
++ * The screen is also started by livi-splash.service at boot, long before Node
++ * has parsed the bundle — that is worth ~6 s of black panel on a Pi 3. So this
++ * manager adopts whatever is already drawing rather than starting a second
++ * copy: two processes would fight over the single DRM master.
++ *
 + * If the binary is missing (or LIVI_STATUSUI=0) everything here is a no-op —
 + * the appliance must never fail because its idle screen is absent.
 + */
-+import { spawn, type ChildProcess } from 'node:child_process'
++import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 +import { existsSync } from 'node:fs'
 +
 +const BIN = process.env.LIVI_STATUSUI_BIN ?? '/opt/livi/statusui/livi-statusui'
@@ -124,6 +129,9 @@ index 0000000..0ed7166
 +
 +  show(): void {
 +    if (!this.enabled || this.stopping || this.child) return
++    // Something is already on screen (livi-splash from boot, or a leftover):
++    // leave it be. hide() knows how to stop it.
++    if (this.externalRunning()) return
 +    const now = Date.now()
 +    if (now - this.lastSpawn < 2000) return // crash-loop guard
 +    this.lastSpawn = now
@@ -142,7 +150,26 @@ index 0000000..0ed7166
 +  hide(): void {
 +    const child = this.child
 +    this.child = null
-+    child?.kill('SIGTERM')
++    if (child) {
++      child.kill('SIGTERM')
++      return
++    }
++    // Not ours — the boot splash. Signal it by name; it releases the DRM master
++    // by exiting, which is what kmssink is waiting for.
++    try {
++      execFileSync('pkill', ['-x', 'livi-statusui'], { stdio: 'ignore' })
++    } catch {
++      /* nothing running */
++    }
++  }
++
++  private externalRunning(): boolean {
++    try {
++      execFileSync('pgrep', ['-x', 'livi-statusui'], { stdio: 'ignore' })
++      return true
++    } catch {
++      return false
++    }
 +  }
 +
 +  /** One line of secondary text on the idle screen; trimmed, single line. */
