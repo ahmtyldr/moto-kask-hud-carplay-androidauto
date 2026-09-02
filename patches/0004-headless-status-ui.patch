@@ -1,8 +1,8 @@
 diff --git a/src/main/headless/index.ts b/src/main/headless/index.ts
-index 3138a1e..ddc7288 100644
+index 3138a1e..2276e7b 100644
 --- a/src/main/headless/index.ts
 +++ b/src/main/headless/index.ts
-@@ -23,23 +23,43 @@ import { loadConfig } from '@main/config/loadConfig'
+@@ -23,23 +23,46 @@ import { loadConfig } from '@main/config/loadConfig'
  import { ProjectionService } from '@main/services/projection/services/ProjectionService'
  import { USBService } from '@main/services/usb/USBService'
  import { setStreamGamma } from '@main/services/video/GstVideo'
@@ -17,6 +17,8 @@ index 3138a1e..ddc7288 100644
 + * phone-served settings page would tomorrow.
   */
 -function createEventSink(verbose: boolean): { send: (ch: string, ...a: unknown[]) => void; id: number } {
++const wdNote: { hook: (ch: string, a: unknown[]) => void } = { hook: () => {} }
++
 +function createEventSink(
 +  verbose: boolean,
 +  statusUi: StatusUi
@@ -27,6 +29,7 @@ index 3138a1e..ddc7288 100644
 +    // close; without it the emit throws and takes the whole process down.
 +    isDestroyed: (): boolean => false,
      send: (channel: string, ...args: unknown[]): void => {
++      wdNote.hook(channel, args)
 +      statusUi.onEvent(channel, args)
        if (!verbose) return
        console.log(`[event] ${channel}`, ...args.map((a) => JSON.stringify(a)?.slice(0, 300)))
@@ -48,7 +51,7 @@ index 3138a1e..ddc7288 100644
  async function main(): Promise<void> {
    const config = loadConfig()
    setDebugLogging(config.debugLogging === true)
-@@ -53,8 +73,9 @@ async function main(): Promise<void> {
+@@ -53,8 +76,9 @@ async function main(): Promise<void> {
  
    const projectionService = new ProjectionService()
    const usbService = new USBService(projectionService)
@@ -59,7 +62,7 @@ index 3138a1e..ddc7288 100644
  
    // Display calibration lives in the video pipeline, not the UI, so it still applies.
    setStreamGamma(
-@@ -76,6 +97,7 @@ async function main(): Promise<void> {
+@@ -76,6 +100,7 @@ async function main(): Promise<void> {
      stopping = true
      console.log(`[headless] ${signal} — stopping`)
      try {
@@ -67,9 +70,38 @@ index 3138a1e..ddc7288 100644
        usbService.beginShutdown()
        projectionService.beginShutdown()
        await Promise.race([
-@@ -91,6 +113,7 @@ async function main(): Promise<void> {
+@@ -90,7 +115,36 @@ async function main(): Promise<void> {
+   process.on('SIGINT', () => void shutdown('SIGINT'))
    process.on('SIGTERM', () => void shutdown('SIGTERM'))
  
++
++  // Disconnect watchdog. A phone that vanishes without closing the socket (BT
++  // and Wi-Fi switched off, or it simply rode away) leaves the session — and a
++  // frozen last frame — up for ~90 s. Phone-originated events (media, nav,
++  // audio, commands) flow continuously while a session is real, so 20 s of
++  // silence from them means the phone is gone; transport/device chatter keeps
++  // flowing after a drop and must not reset the clock.
++  let wdLast = Date.now()
++  let wdShown = false
++  wdNote.hook = (channel: string, args: unknown[]): void => {
++    const ev = channel === 'projection-event' ? (args[0] as { type?: string; shown?: boolean }) : null
++    const t = ev?.type
++    if (t && t !== 'transportState' && t !== 'devices' && t !== 'bluetoothPairedList' && t !== 'session')
++      wdLast = Date.now()
++    if (t === 'projection') wdShown = !!ev?.shown
++  }
++  setInterval(() => {
++    if (wdShown && Date.now() - wdLast > 20000) {
++      console.log('[watchdog] projection silent for 20s — treating the phone as gone')
++      wdShown = false
++      try {
++        ;(projectionService as unknown as { restartSession: () => void }).restartSession()
++      } catch (err) {
++        console.error('[watchdog]', err)
++      }
++    }
++  }, 3000).unref()
++
    await projectionService.autoStartIfNeeded()
 +  statusUi.show()
    console.log('[headless] projection armed — waiting for a phone')
@@ -77,10 +109,10 @@ index 3138a1e..ddc7288 100644
  
 diff --git a/src/main/headless/statusUi.ts b/src/main/headless/statusUi.ts
 new file mode 100644
-index 0000000..d4e2b13
+index 0000000..25caf6f
 --- /dev/null
 +++ b/src/main/headless/statusUi.ts
-@@ -0,0 +1,125 @@
+@@ -0,0 +1,155 @@
 +/**
 + * Idle-screen manager: drives the LVGL status binary (livi-statusui).
 + *
@@ -135,6 +167,32 @@ index 0000000..d4e2b13
 +    const now = Date.now()
 +    if (now - this.lastSpawn < 2000) return // crash-loop guard
 +    this.lastSpawn = now
++    // Two things must be true before this screen can actually appear, both
++    // learned the hard way on hardware (each alone still left a black panel):
++    //  1. gst-host keeps its DRM fd — and the master with it — after the
++    //     pipeline stops, so no other client can touch the display until the
++    //     process is gone. LIVI respawns it on the next video start
++    //     (gstHost.ts nulls the child on exit), so killing it here is safe.
++    //  2. kmssink leaves every plane without a framebuffer; LVGL's DRM driver
++    //     then flips onto an already-lit CRTC without a full modeset and shows
++    //     nothing. Cycling the connector (livi-display-reset, sudoers 011)
++    //     forces the first-boot path: full modeset, visible frames.
++    try {
++      execFileSync('/bin/sh', ['-c', 'pkill -x livi-gst-host 2>/dev/null; sleep 0.4'], {
++        stdio: 'ignore',
++        timeout: 3000
++      })
++    } catch {
++      /* none running */
++    }
++    try {
++      execFileSync('sudo', ['-n', '/usr/local/bin/livi-display-reset'], {
++        stdio: 'ignore',
++        timeout: 5000
++      })
++    } catch {
++      /* helper missing — the first boot still works without it */
++    }
 +    const child = spawn(BIN, [], { stdio: ['pipe', 'inherit', 'inherit'] })
 +    child.on('exit', () => {
 +      if (this.child === child) this.child = null
@@ -188,9 +246,13 @@ index 0000000..d4e2b13
 +      else this.show()
 +      return
 +    }
-+    // Defensive: a session count of zero also means nothing owns the screen.
-+    if (ev.type === 'session' && (ev as { total?: number }).total === 0) {
-+      this.show()
++    // Session events arrive seconds before the video's own shown:true, and on a
++    // fast reconnect that head start is what lets the screen be released before
++    // kmssink calls set_caps — waiting for shown:true loses that race (seen on
++    // hardware: session + audio alive, video dead with "negotiation problem").
++    if (ev.type === 'session') {
++      if ((ev as { total?: number }).total === 0) this.show()
++      else this.hide()
 +      return
 +    }
 +    if (ev.type && RELAY_TYPES.has(ev.type)) {

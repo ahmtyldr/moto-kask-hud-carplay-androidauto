@@ -26,7 +26,10 @@ Environment=GST_GL_PLATFORM=egl
 # waylandsink cannot start without a compositor, and plain kmssink fails its
 # first page flip with "Device or resource busy"; force-modesetting takes the
 # CRTC properly. Both measured on a Pi 3B+.
-Environment="LIVI_GST_SINK=kmssink force-modesetting=true"
+# restore-crtc=false: on teardown kmssink would otherwise "restore" the CRTC to
+# the disabled state it found, turning the panel off — the idle screen then
+# draws into a dark display and the unit looks dead after every disconnect.
+Environment="LIVI_GST_SINK=kmssink force-modesetting=true restore-crtc=false"
 # No cursor can be drawn over the video, so navigation is the phone's own focus
 # ring driven by rotary ticks — which requires not announcing a touchscreen
 # (patch 0006). The two settings only make sense together.

@@ -107,6 +107,20 @@ EOF
 sudo udevadm control --reload-rules
 sudo udevadm trigger --subsystem-match=usb
 
+# The idle screen needs the connector cycled before it starts (see statusUi.ts:
+# kmssink leaves the planes empty and LVGL's flip path shows nothing without a
+# fresh modeset). Root-only sysfs writes, so a dedicated helper plus sudoers.
+sudo tee /usr/local/bin/livi-display-reset >/dev/null <<'EOF'
+#!/bin/sh
+echo off > /sys/class/drm/card0-HDMI-A-1/status 2>/dev/null
+sleep 0.3
+echo detect > /sys/class/drm/card0-HDMI-A-1/status 2>/dev/null
+EOF
+sudo chmod 755 /usr/local/bin/livi-display-reset
+echo "livi ALL=(root) NOPASSWD: /usr/local/bin/livi-display-reset" | sudo tee /etc/sudoers.d/011-livi-display >/dev/null
+sudo chmod 440 /etc/sudoers.d/011-livi-display
+sudo visudo -cf /etc/sudoers.d/011-livi-display
+
 echo "==> passwordless sudo for the Wi-Fi AP helper"
 # Same shape as LIVI's own sudoers template: python3 + the helper script path.
 # The trailing * covers the helper's own arguments.
@@ -135,12 +149,13 @@ LIVI_UID=$(id -u livi)
 
 echo "==> service"
 sudo cp "$UNIT_SRC" /etc/systemd/system/$SERVICE
-# Early idle screen: fills the panel ~6 s before Node has parsed the bundle.
-SPLASH_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/livi-splash.service"
-if [ -f "$SPLASH_SRC" ] && [ -f "$DEST/statusui/livi-statusui" ]; then
-  sudo cp "$SPLASH_SRC" /etc/systemd/system/livi-splash.service
-  sudo systemctl enable livi-splash.service >/dev/null 2>&1 || true
-fi
+# livi-splash (the early idle screen) is deliberately NOT installed: it only
+# works with a bundle whose StatusUi adopts an already-running screen, and
+# shipping the pair mismatched left an immortal DRM master that blocked every
+# video pipeline with "negotiation problem" while session and audio ran fine.
+# Re-enable it only together with a bundle built from patch 0004 with adoption.
+sudo systemctl disable --now livi-splash.service >/dev/null 2>&1 || true
+sudo rm -f /etc/systemd/system/livi-splash.service
 
 # The boot partition is checked on every start (~1.3 s) for no real benefit on
 # an appliance that never writes to it outside an update. Check it on demand
